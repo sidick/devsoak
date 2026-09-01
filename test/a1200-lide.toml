@@ -1,0 +1,21 @@
+# devsoak dev-test config: A1200 + KS3.2, victim HDF on Copperline's
+# built-in LIDE (RIPPLE) Zorro II IDE board -> lide.device unit 0.
+# lide.device is the modern reference driver with full TD64/NSD support,
+# for comparing 64-bit dialect behaviour against scsi.device.
+#
+# Generate the victim with: xdftool victim.hdf create size=2Mi + format Victim ffs
+
+rom = "/Users/simond/kick32.a1200.rom"
+
+[machine]
+profile = "A1200"
+
+[memory]
+fast = "8M"
+
+[lide]
+board = "ripple"
+drive0 = { path = "victim.hdf", bootpri = -128 }   # mounts, never boots
+
+[serial]
+mode = "stdout"

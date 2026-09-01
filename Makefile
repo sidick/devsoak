@@ -13,7 +13,7 @@ LDLIBS   := -lamiga
 SRCDIR   := src
 OBJDIR   := obj
 SOURCES  := main.c args.c output.c timer.c content.c ring.c ops.c buf.c \
-            engine.c stripe.c stats.c worker.c audit.c
+            engine.c stripe.c stats.c worker.c audit.c invariant.c
 OBJECTS  := $(SOURCES:%.c=$(OBJDIR)/%.o)
 TARGET   := devsoak
 

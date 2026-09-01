@@ -370,6 +370,23 @@ ULONG workers_dead(void);           /* count of error-stopped workers */
  * worker/cmd if wanted (may pass NULL) */
 ULONG workers_oldest_secs(ULONG *worker, ULONG *cmd);
 
+/* ---- invariant.c (§8/§16.3): continuous edge-case matrix ----
+ * A dedicated task (pri 0, own port/requests/buffer) runs the named §8
+ * tests in risk-tier order (0 -> 1 -> 2, tier 3 only with -Z), a full
+ * pass every few seconds for the whole soak. "Pinned" behaviours record
+ * the first observation; any later deviation is an error. Tier-2/3
+ * commands emit an "about to send" serial breadcrumb before their FIRST
+ * issue (§16.4). Matrix failures are folded into the stats error count
+ * AND tracked separately for the verdict/summary. */
+
+LONG  invariant_start(void);
+void  invariant_request_stop(void);
+void  invariant_wait_done(void);
+void  invariant_cleanup(void);
+ULONG invariant_errors(void);       /* matrix failures so far */
+ULONG invariant_passes(void);       /* completed full matrix passes */
+void  invariant_print_pins(void);   /* main-only: end-of-run pin summary */
+
 /* ---- audit.c (§6): periodic full-range sweeps ---- */
 
 LONG  auditor_start(void);          /* task sweeping every cfg.audit_min */

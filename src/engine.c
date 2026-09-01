@@ -428,6 +428,10 @@ engine_run(void)
      * otherwise ready to go. */
     auditor_start();
 
+    /* §8 matrix task; a spawn failure degrades the run (no matrix
+     * coverage) but is not fatal -- it reports itself. */
+    invariant_start();
+
     /* ---- main loop: status/watchdog until duration elapses, Ctrl-C, or
      * the workload stops itself (stoponerror / all workers dead). ---- */
     {
@@ -545,9 +549,11 @@ engine_run(void)
         LONG  final_audit_rc;
         struct StatsSnap fsnap;
 
+        invariant_request_stop();
         auditor_request_stop();
         workers_request_stop();
         workers_wait_done();
+        invariant_wait_done();
         auditor_wait_done();
         out_drain();
 
@@ -559,11 +565,17 @@ engine_run(void)
         out_drain();
 
         workers_cleanup();
+        invariant_cleanup();
         auditor_cleanup();
+
+        out_printf("devsoak: matrix: %ld full passes, %ld failures",
+                    (LONG)invariant_passes(), (LONG)invariant_errors());
+        invariant_print_pins();
 
         stats_snapshot(&fsnap);
 
-        if (fsnap.errors != 0 || dead != 0 || final_audit_rc != RC_CLEAN)
+        if (fsnap.errors != 0 || dead != 0 || final_audit_rc != RC_CLEAN ||
+            invariant_errors() != 0)
             rc = RC_ERROR;
         else if (ctrlc_break)
             rc = RC_WARN;

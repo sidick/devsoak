@@ -284,6 +284,27 @@ cleanup_close:
         CloseDevice((struct IORequest *)io);
         opened = 0;
         dev.opened = 0;
+
+        /* §8 lifecycle: after everything has closed, the device must
+         * open again (catches wrong open counts / premature expunge).
+         * Only meaningful after a full run, but harmless otherwise. */
+        if (OpenDevice((CONST_STRPTR)cfg.device, cfg.unit,
+                       (struct IORequest *)io, 0) == 0) {
+            CloseDevice((struct IORequest *)io);
+            out_printf("devsoak: lifecycle: reopen after close ok");
+        } else {
+            out_printf("devsoak: lifecycle: REOPEN AFTER CLOSE FAILED, "
+                       "io_Error %ld (wrong open count / premature "
+                       "expunge?)", (LONG)io->iotd_Req.io_Error);
+            if (rc == RC_CLEAN || rc == RC_WARN) {
+                rc = RC_ERROR;
+                /* engine_run() already printed its RESULT line; issue a
+                 * corrected final verdict so CI grepping the last RESULT
+                 * sees the failure */
+                out_printf("devsoak: RESULT FAIL rc=%ld (lifecycle)",
+                           (LONG)rc);
+            }
+        }
     }
     if (io != NULL) DeleteExtIO((struct IORequest *)io);
     if (port != NULL) DeletePort(port);
