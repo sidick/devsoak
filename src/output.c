@@ -46,6 +46,31 @@ static UBYTE out_mode;
 static UBYTE con_buf[LINE_BUF_SIZE];
 static UBYTE ser_buf[LINE_BUF_SIZE];
 
+/* ---- cross-task console queue (S9.1) ----
+ * out_task_printf() is callable from any task. The serial sink is emitted
+ * immediately, unbuffered, exactly like out_serial_line() -- no queue
+ * involved, no cross-task state. The console copy cannot be Write()n by
+ * whichever task happens to call out_task_printf(): only main may touch
+ * the DOS Output() handle. So the formatted line is instead copied into a
+ * small ring buffer and main drains it later with out_drain().
+ *
+ * The ring is a fixed array of fixed-size line slots -- no allocation,
+ * nothing that could fail at runtime beyond simply being full. All index
+ * and buffer mutation happens under Forbid()/Permit(); the actual Write()
+ * in out_drain() never happens while Forbid() is held (Write() can block
+ * for arbitrarily long, and holding Forbid() across it would stall every
+ * other task, including the ones waiting to enqueue their own lines). */
+
+#define TASKQ_LINES     64
+#define TASKQ_LINE_SIZE 200
+
+static UBYTE taskq_buf[TASKQ_LINES][TASKQ_LINE_SIZE];
+static UBYTE taskq_len[TASKQ_LINES];
+static ULONG taskq_head;      /* next slot to dequeue */
+static ULONG taskq_tail;      /* next slot to enqueue */
+static ULONG taskq_count;     /* slots currently in use */
+static ULONG taskq_dropped;   /* lines dropped because the queue was full */
+
 static void rawputchar(LONG c)
 {
     register struct ExecBase *a6 asm("a6") = SysBase;
@@ -120,9 +145,11 @@ void out_init(UBYTE mode)
 
 void out_cleanup(void)
 {
-    /* Nothing to flush: the console sink Write()s per line and never
-       holds a private handle (Output() is the CLI's own), and the
-       serial sink is unbuffered by design. */
+    /* Flush anything left in the cross-task queue before going away; the
+       console sink otherwise Write()s per line and never holds a private
+       handle (Output() is the CLI's own), and the serial sink is
+       unbuffered by design, so there is nothing else to flush. */
+    out_drain();
 }
 
 void out_printf(const char *fmt, ...)
@@ -157,4 +184,87 @@ void out_serial_line(const char *fmt, ...)
     va_start(ap, fmt);
     serial_emit(fmt, ap);
     va_end(ap);
+}
+
+/* Any-task printf (S9.1): serial copy goes out immediately, exactly like
+ * out_serial_line(), whenever the sink is active (OUT_SER/OUT_BOTH) --
+ * unlike out_serial_line() this is ordinary output, not a crash
+ * breadcrumb, so it does not force itself onto the wire in OUT_CON mode.
+ * The console copy (OUT_CON/OUT_BOTH) is handed to a small ring queue for
+ * main to Write() later via out_drain(); a full queue drops the line and
+ * bumps a counter instead of blocking or discarding earlier lines. Own
+ * static formatting buffer, entirely under one Forbid()/Permit() span, so
+ * this never races out_printf()'s con_buf/ser_buf. */
+static UBYTE taskq_fmt_buf[LINE_BUF_SIZE];
+
+void out_task_printf(const char *fmt, ...)
+{
+    va_list ap;
+    ULONG len, i, qlen;
+
+    Forbid();
+
+    va_start(ap, fmt);
+    len = format_line(taskq_fmt_buf, fmt, ap);
+    va_end(ap);
+
+    if (out_mode == OUT_SER || out_mode == OUT_BOTH) {
+        for (i = 0; i < len; i++)
+            rawputchar((LONG)(UBYTE)taskq_fmt_buf[i]);
+        rawputchar((LONG)'\r');
+        rawputchar((LONG)'\n');
+    }
+
+    if (out_mode == OUT_CON || out_mode == OUT_BOTH) {
+        if (taskq_count < TASKQ_LINES) {
+            qlen = len;
+            if (qlen > TASKQ_LINE_SIZE - 1)
+                qlen = TASKQ_LINE_SIZE - 1;
+            for (i = 0; i < qlen; i++)
+                taskq_buf[taskq_tail][i] = taskq_fmt_buf[i];
+            taskq_len[taskq_tail] = (UBYTE)qlen;
+            taskq_tail = (taskq_tail + 1) % TASKQ_LINES;
+            taskq_count++;
+        } else {
+            taskq_dropped++;
+        }
+    }
+
+    Permit();
+}
+
+/* Main-task-only: drain the cross-task console queue. Each iteration
+ * copies one line out under Forbid(), Permits, then Write()s it -- never
+ * holding Forbid() across the Write(). A dropped-line marker (if any) is
+ * emitted last via out_printf() itself, after the counter is reset under
+ * its own short Forbid() span. */
+void out_drain(void)
+{
+    UBYTE local[TASKQ_LINE_SIZE];
+    ULONG llen, i, dropped;
+
+    for (;;) {
+        Forbid();
+        if (taskq_count == 0) {
+            Permit();
+            break;
+        }
+        llen = taskq_len[taskq_head];
+        for (i = 0; i < llen; i++)
+            local[i] = taskq_buf[taskq_head][i];
+        taskq_head = (taskq_head + 1) % TASKQ_LINES;
+        taskq_count--;
+        Permit();
+
+        local[llen] = '\n';
+        Write(Output(), local, llen + 1);
+    }
+
+    Forbid();
+    dropped = taskq_dropped;
+    taskq_dropped = 0;
+    Permit();
+
+    if (dropped)
+        out_printf("devsoak: (%lu console lines dropped)", dropped);
 }

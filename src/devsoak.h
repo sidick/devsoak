@@ -276,9 +276,109 @@ void  op_do_sync(struct IOExtTD *io, ULONG submit, struct Result *res);
 void  op_simple(struct IOExtTD *io, UWORD cmd, struct Result *res);
 const char *op_cmd_name(UWORD cmd);
 
-/* ---- engine.c (M2): fill pass, sequential verify, soak loop ---- */
+/* ---- engine.c: orchestrator ---- */
 
 LONG  engine_run(void);             /* returns RC_CLEAN/RC_ERROR/RC_FATAL */
+
+/* ---- M3 concurrency ---- */
+
+#define MAX_WORKERS  8
+#define MAX_QDEPTH   8
+
+/* Shared per-sector write-count table (cfg.range_len UWORD entries,
+ * indexed range-relative). Guarded by the stripe semaphores: touch an
+ * entry only while holding its stripe. Owned by engine.c. */
+extern UWORD *g_generation;
+
+/* engine.c setup results shared with worker/audit tasks (read-only
+ * after workers start) */
+extern ULONG g_changenum;           /* ETD dialects' change count */
+extern ULONG g_enabled_dialects[DIALECT_COUNT];
+extern ULONG g_n_enabled;           /* probe-verified dialect set */
+extern ULONG g_chunk_bytes;         /* per-request transfer cap */
+
+/* ---- stripe.c (§6): one SignalSemaphore per -S sectors ----
+ * Deadlock rule: workers NEVER block on stripes -- stripes_attempt()
+ * only (ascending, all-or-nothing); on failure they pick a different
+ * op. Only a task holding no stripes at all (the auditor, main) may use
+ * the blocking stripes_obtain(), also ascending. NOTE SignalSemaphores
+ * nest per-task: a worker's own two in-flight ops would both "acquire"
+ * the same stripe, so workers must additionally avoid overlapping their
+ * own in-flight sector ranges. */
+
+LONG  stripes_init(void);           /* from cfg.stripe / cfg.range_len */
+void  stripes_cleanup(void);
+LONG  stripes_attempt(ULONG start, ULONG n);  /* range-relative sectors;
+                                                 1 = all acquired */
+void  stripes_release(ULONG start, ULONG n);
+void  stripes_obtain(ULONG start, ULONG n);   /* blocking; hold nothing */
+
+/* ---- stats.c (§6): semaphore-guarded stats + latency histogram ---- */
+
+#define CLASS_READ   0
+#define CLASS_WRITE  1
+#define CLASS_HK     2              /* housekeeping */
+#define CLASS_COUNT  3
+
+#define LAT_BUCKETS  24             /* log2(usec) buckets */
+
+struct StatsSnap {
+    ULONG ops[CLASS_COUNT];
+    U64   bytes[CLASS_COUNT];
+    ULONG errors;
+    ULONG p50_usec[CLASS_COUNT];
+    ULONG p99_usec[CLASS_COUNT];
+};
+
+void  stats_init(void);
+void  stats_record(ULONG cls, ULONG bytes, ULONG usec, LONG err);
+void  stats_snapshot(struct StatsSnap *out);
+
+/* ---- worker.c (§6/§7): N worker tasks, q requests in flight each ---- */
+
+struct WorkerSlot {                 /* watchdog-visible, update under
+                                       Forbid() */
+    UBYTE  active;
+    UBYTE  is_write;
+    UWORD  cmd;
+    ULONG  submit_secs;             /* timer_gettime at SendIO */
+    ULONG  start_idx;               /* range-relative first sector */
+    ULONG  nsect;
+};
+
+struct WorkerCtx {
+    ULONG            id;            /* 1..N (0 = main/auditor) */
+    struct Task     *task;
+    volatile UBYTE   stop;          /* main -> worker: finish up */
+    volatile UBYTE   done;          /* worker -> main: exited cleanly */
+    volatile UBYTE   dead;          /* worker stopped itself on error */
+    ULONG            rng;
+    ULONG            inflight;
+    struct WorkerSlot slots[MAX_QDEPTH];
+    /* opaque to everyone but worker.c beyond here (ports, IOExtTDs,
+       buffers) -- worker.c defines the rest via its own private struct
+       that embeds this one. */
+};
+
+LONG  workers_start(void);          /* spawn cfg.workers tasks; 0 = ok */
+void  workers_request_stop(void);
+void  workers_wait_done(void);      /* returns once all done/dead */
+void  workers_cleanup(void);
+ULONG workers_inflight(void);       /* total, for the status line */
+ULONG workers_dead(void);           /* count of error-stopped workers */
+/* watchdog scan: oldest outstanding request age in seconds, and its
+ * worker/cmd if wanted (may pass NULL) */
+ULONG workers_oldest_secs(ULONG *worker, ULONG *cmd);
+
+/* ---- audit.c (§6): periodic full-range sweeps ---- */
+
+LONG  auditor_start(void);          /* task sweeping every cfg.audit_min */
+void  auditor_request_stop(void);
+void  auditor_wait_done(void);
+void  auditor_cleanup(void);
+/* One full sweep in the calling task's context (used by main for the
+ * initial/final audits; takes stripe locks; returns RC_*). */
+LONG  audit_sweep(const char *label);
 
 /* ---- output.c (§9.1) ----
  * Every line devsoak prints goes through out_printf().  RawDoFmt formats;
@@ -289,7 +389,14 @@ LONG  engine_run(void);             /* returns RC_CLEAN/RC_ERROR/RC_FATAL */
  */
 void out_init(UBYTE mode);       /* OUT_CON/OUT_SER/OUT_BOTH */
 void out_cleanup(void);
-void out_printf(const char *fmt, ...);
+void out_printf(const char *fmt, ...);   /* main task only (console) */
+/* Any-task printf: serial sink emitted immediately (unbuffered, as
+ * out_serial_line); console copy is queued for main, which must call
+ * out_drain() regularly. Queue overflow drops the console copy (a
+ * "... N console lines dropped" marker is emitted) -- the serial copy
+ * always got out first. */
+void out_task_printf(const char *fmt, ...);
+void out_drain(void);            /* main: flush queued console lines */
 /* Serial-only, unbuffered, any-task: crash breadcrumbs (§16.4). Always
  * emits to the serial sink regardless of the -o mode: serial is the only
  * sink guaranteed to survive a hang or crash. */

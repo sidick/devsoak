@@ -1,25 +1,49 @@
 /*
  * timer.c - devsoak timing helper (implementation brief S13).
  *
- * Wall-clock time for the main task: TR_GETSYSTIME on Kickstart V36+
- * (exec/kickstart >= 2.0), DateStamp() fallback (1/50 s ticks) on 1.3.
- * Also provides timer_delay_ms() via TR_ADDREQUEST on UNIT_VBLANK, which
- * is independent of dos.library Delay() so it works before/without DOS.
+ * Wall-clock time is needed from many tasks at once (main, workers, the
+ * auditor), so timer_gettime() must be task-safe without ever doing a
+ * DoIO() on a request another task might touch: DoIO()'s internal Wait()
+ * implicitly Permits while the caller is suspended, which is exactly the
+ * window where a second task could issue its own command on the *same*
+ * timerequest and corrupt it. A Forbid() around the DoIO(), as this file
+ * used to have, does not close that window -- it only looks like it does.
  *
- * One timerequest is opened at UNIT_VBLANK and reused for both
- * TR_GETSYSTIME and TR_ADDREQUEST. For M1 (single-task use from main
- * only) this is safe; if a later milestone calls timer_gettime() or
- * timer_delay_ms() from worker tasks concurrently, this must move to a
- * request-per-task (or per-call) scheme -- see the Forbid()/Permit()
- * guard around the TR_GETSYSTIME DoIO below, which exists only to keep
- * the shared request self-consistent for M1, not as a real multi-task
- * solution.
+ * V36+ (2.0 and later): timer.device exports GetSysTime() as an ordinary
+ * *library* call (LVO -66, TR_GETSYSTIME's non-IORequest twin), usable
+ * from any task with no IORequest and no Forbid() at all. TimerBase (a
+ * "struct Device *", per timer.device convention, even though GetSysTime
+ * is declared against "struct Library *") is captured once in
+ * timer_init() from the already-open timerequest's io_Device and never
+ * touched again, so every later timer_gettime() call is just a call
+ * through TimerBase -- safe from any number of concurrent tasks.
+ *
+ * <V36 (Kickstart 1.3): timer.device has no GetSysTime() library call, so
+ * there is no task-safe way to read a live clock without a private
+ * IORequest per caller. DateStamp() would work, but it is a dos.library
+ * call and worker/auditor tasks in devsoak are plain Exec tasks with no
+ * Process -- calling dos.library from them is unsafe/undefined. DECISION:
+ * on <V36, timer_gettime() calls DateStamp() only when the calling task
+ * is actually a Process (tc_Node.ln_Type == NT_PROCESS), and caches the
+ * result (cached_s/cached_u) under Forbid(); non-Process callers (the
+ * worker/auditor tasks) just read that cache under Forbid(). This makes
+ * <V36 timestamps second-granular and up to ~1s stale for non-Process
+ * callers instead of tick-accurate, which is an accepted trade-off: on
+ * 1.3, worker/ring/watchdog timestamps only need "roughly when", and the
+ * alternative (no safe clock at all for those tasks) is worse. main and
+ * the auditor, when run as/with a Process, keep tick-accurate stamps and
+ * refresh the shared cache for everyone else.
+ *
+ * timer_delay_ms() is unchanged: main-task-only by convention (not
+ * enforced), still uses the shared UNIT_VBLANK timerequest via
+ * TR_ADDREQUEST/DoIO(). It must not be called from worker/auditor tasks.
  */
 
 #include "devsoak.h"
 
 #include <proto/exec.h>
 #include <proto/dos.h>
+#include <proto/timer.h>  /* GetSysTime() -- needs the TimerBase global below */
 #include <proto/alib.h>   /* CreatePort/CreateExtIO/DeletePort/DeleteExtIO */
 #include <exec/execbase.h>
 #include <dos/dos.h>
@@ -27,12 +51,22 @@
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
 
+/* proto/timer.h's GetSysTime() macro calls through a global literally
+ * named TimerBase (TIMER_BASE_NAME, unset here so it defaults to
+ * "TimerBase"). Declaring it as a real global (not just extern) is what
+ * the brief calls for; it is populated once in timer_init(). */
+struct Device *TimerBase;
+
 #define TIMER_UNIT  UNIT_VBLANK
 
 static struct MsgPort     *timer_port;
 static struct timerequest *timer_io;
 static UBYTE                timer_open;
 static UBYTE                have_v36;
+
+/* <V36 fallback cache -- see the file comment. Guarded by Forbid(). */
+static ULONG cached_s;
+static ULONG cached_u;
 
 LONG timer_init(void)
 {
@@ -62,6 +96,15 @@ LONG timer_init(void)
     }
     timer_open = 1;
 
+    /* Capture TimerBase for the V36+ GetSysTime() library call. Even
+       though every NDK header spells this "struct Device *", it is really
+       just a base register value to GetSysTime() -- no different from any
+       other library base. */
+    TimerBase = (struct Device *)timer_io->tr_node.io_Device;
+
+    cached_s = 0;
+    cached_u = 0;
+
     return 0;
 }
 
@@ -79,29 +122,46 @@ void timer_cleanup(void)
         DeletePort(timer_port);
         timer_port = NULL;
     }
+
+    TimerBase = NULL;
 }
 
 void timer_gettime(ULONG *secs, ULONG *micros)
 {
-    if (have_v36 && timer_io != NULL) {
-        /* Wait() (inside DoIO) implicitly Permits while blocked and
-           re-Forbids on return, so this is safe even though DoIO can
-           suspend the task -- it just keeps other tasks from touching
-           timer_io between the request being issued and answered. */
-        Forbid();
-        timer_io->tr_node.io_Command = TR_GETSYSTIME;
-        timer_io->tr_node.io_Flags = 0;
-        DoIO((struct IORequest *)timer_io);
-        *secs = timer_io->tr_time.tv_secs;
-        *micros = timer_io->tr_time.tv_micro;
-        Permit();
-    } else {
+    if (have_v36 && TimerBase != NULL) {
+        /* Ordinary library call, no IORequest, no Forbid() needed --
+           task-safe for any number of concurrent callers. */
+        struct timeval tv;
+        GetSysTime(&tv);
+        *secs = tv.tv_secs;
+        *micros = tv.tv_micro;
+        return;
+    }
+
+    /* <V36: see the file comment for why this is a Process-only
+       DateStamp() plus a Forbid()-guarded cache for everyone else. */
+    if (((struct Task *)FindTask(NULL))->tc_Node.ln_Type == NT_PROCESS) {
         struct DateStamp ds;
+        ULONG s, u;
+
         DateStamp(&ds);
-        *secs = (ULONG)ds.ds_Days * 86400UL
-              + (ULONG)ds.ds_Minute * 60UL
-              + (ULONG)(ds.ds_Tick / 50);
-        *micros = (ULONG)(ds.ds_Tick % 50) * 20000UL;
+        s = (ULONG)ds.ds_Days * 86400UL
+          + (ULONG)ds.ds_Minute * 60UL
+          + (ULONG)(ds.ds_Tick / 50);
+        u = (ULONG)(ds.ds_Tick % 50) * 20000UL;
+
+        Forbid();
+        cached_s = s;
+        cached_u = u;
+        Permit();
+
+        *secs = s;
+        *micros = u;
+    } else {
+        Forbid();
+        *secs = cached_s;
+        *micros = cached_u;
+        Permit();
     }
 }
 
