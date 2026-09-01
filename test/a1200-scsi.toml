@@ -1,0 +1,20 @@
+# devsoak dev-test config: A1200 + KS3.2, victim HDF on Gayle IDE
+# (scsi.device unit 0), serial to host stdout for -o ser capture.
+#
+# The victim HDF path is relative to the copperline working directory;
+# generate it with:  xdftool victim.hdf create size=2Mi + format Victim ffs
+# The rom path assumes Simon's kick32.a1200.rom; override as needed.
+
+rom = "/Users/simond/kick32.a1200.rom"
+
+[machine]
+profile = "A1200"
+
+[memory]
+fast = "8M"
+
+[ide]
+master = { path = "victim.hdf", bootpri = -128 }   # mounts, never boots
+
+[serial]
+mode = "stdout"
