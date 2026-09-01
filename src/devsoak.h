@@ -149,6 +149,137 @@ struct DevUnderTest {
 extern struct Config       cfg;
 extern struct DevUnderTest dev;
 
+/* ---- PRNG: xorshift32, one state per task (§13) ---- */
+
+static __inline ULONG xs32(ULONG *s)
+{
+    ULONG x = *s;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return *s = x;
+}
+
+/* xorshift32 must never be seeded 0 (it would stick there) */
+#define XS32_SEED(v) ((v) ? (v) : 0x9E3779B9UL)
+
+/* ---- content.c (§5): sector content model ----
+ * Every sector devsoak writes carries a 32-byte header followed by an
+ * xorshift32 payload seeded  seed ^ (ULONG)sector ^ (generation << 16).
+ * All verification is recomputable from (sector, generation).
+ */
+
+#define DSOK_MAGIC 0x44534F4BUL     /* 'DSOK' */
+
+struct SectorHdr {                  /* big-endian on target = native */
+    ULONG magic;                    /* 'DSOK' */
+    ULONG seed;                     /* run seed */
+    ULONG sector_hi;                /* absolute 64-bit LBA written to */
+    ULONG sector_lo;
+    ULONG generation;               /* per-sector write count, from 1 */
+    ULONG writer;                   /* worker id (0 = auditor/main) */
+    ULONG xfer_len;                 /* io_Length of the owning transfer */
+    ULONG hdr_check;                /* XOR of the previous 7 longwords */
+};
+
+/* content_verify() result classes; each maps to a driver-bug class (§5) */
+#define CV_OK            0
+#define CV_HDR_CORRUPT   1  /* magic/seed/checksum wrong: not our data */
+#define CV_WRONG_SECTOR  2  /* offset arithmetic / high word / off-by-one */
+#define CV_STALE_GEN     3  /* lost write, reordering, cache not flushed */
+#define CV_PAYLOAD       4  /* header right, payload wrong: partial DMA */
+#define CV_FOREIGN       5  /* writer/xfer_len from another request */
+
+void content_build(UBYTE *sect, U64 lba, ULONG generation, ULONG writer,
+                   ULONG xfer_len);
+/* expect_gen: value from generation[]; first_diff always gets the first
+ * differing byte offset within the sector (0..31 for header-level
+ * failures, >= 32 for payload mismatches). */
+LONG content_verify(const UBYTE *sect, U64 lba, ULONG expect_gen,
+                    ULONG *first_diff);
+void content_decode_hdr(const UBYTE *sect, struct SectorHdr *out);
+const char *content_class_name(LONG cv);
+
+/* ---- ring.c (§9): op ring buffer ---- */
+
+struct RingEntry {
+    ULONG secs, micros;             /* timer_gettime stamp */
+    UWORD worker;                   /* 0 = main/auditor */
+    UWORD cmd;                      /* io_Command */
+    ULONG off_hi, off_lo;           /* byte offset */
+    ULONG length;
+    APTR  data;
+    LONG  err;                      /* io_Error (LONG for -1 sentinel) */
+    ULONG actual;
+};
+
+LONG  ring_init(ULONG entries);     /* tries 'entries', halves on alloc
+                                       failure; 0 on success */
+void  ring_cleanup(void);
+void  ring_log(const struct RingEntry *e);      /* task-safe */
+void  ring_dump(ULONG maxn);        /* newest-last, via out_printf */
+
+/* ---- buf.c: guarded, alignment/memtype-variant I/O buffers ---- */
+
+#define GUARD_BYTES 64
+#define GUARD_FILL  0xCC
+
+#define ALIGN_LONG    0             /* longword aligned */
+#define ALIGN_WORD    1             /* +2 */
+#define ALIGN_ODD     2             /* +1 */
+#define ALIGN_CROSS4K 3             /* crosses a 4 KB boundary */
+
+struct TestBuf {
+    UBYTE *base;                    /* AllocMem'd block */
+    ULONG  basesize;
+    UBYTE *data;                    /* io_Data: aligned per variant,
+                                       GUARD_BYTES of 0xCC either side */
+    ULONG  len;                     /* usable data length */
+};
+
+LONG  buf_alloc(struct TestBuf *b, ULONG len, ULONG alignsel, ULONG memflags);
+void  buf_free(struct TestBuf *b);
+LONG  buf_check_guards(const struct TestBuf *b);  /* 0 ok, else guard
+                                                     offset +1 (pre) or
+                                                     -(offset+1) (post) */
+void  buf_prefill(struct TestBuf *b, UBYTE pattern);
+
+/* ---- ops.c (§13): request builders, normalised result ---- */
+
+struct Result {
+    LONG  err;                      /* io_Error, normalised */
+    ULONG actual;                   /* io_Actual after completion */
+    ULONG flags;                    /* io_Flags after completion */
+    ULONG usec;                     /* wall latency (best effort) */
+};
+
+#define DIALECT_CMD      0          /* CMD_READ/CMD_WRITE */
+#define DIALECT_ETD      1          /* ETD_READ/ETD_WRITE (iotd_Count) */
+#define DIALECT_TD64     2          /* TD_READ64/TD_WRITE64 (24/25) */
+#define DIALECT_NSD64    3          /* NSCMD_TD_READ64/WRITE64 */
+#define DIALECT_NSDETD64 4          /* NSCMD_ETD_READ64/WRITE64 */
+#define DIALECT_COUNT    5
+
+#define SUBMIT_DOIO      0
+#define SUBMIT_SENDIO    1          /* SendIO + WaitIO */
+#define SUBMIT_QUICK     2          /* BeginIO with IOF_QUICK */
+
+/* Build a read/write. 64-bit dialects put the offset high word in
+ * io_Actual (devtest convention); io_Actual/io_Error are pre-filled 0xa5
+ * so a driver leaving them untouched is caught. changenum only matters
+ * for ETD dialects. */
+void  op_build_rw(struct IOExtTD *io, ULONG dialect, ULONG is_write,
+                  U64 byteoff, APTR data, ULONG len, ULONG changenum);
+/* Submit + wait synchronously, fill res (including latency). */
+void  op_do_sync(struct IOExtTD *io, ULONG submit, struct Result *res);
+/* Housekeeping/no-data command via DoIO. */
+void  op_simple(struct IOExtTD *io, UWORD cmd, struct Result *res);
+const char *op_cmd_name(UWORD cmd);
+
+/* ---- engine.c (M2): fill pass, sequential verify, soak loop ---- */
+
+LONG  engine_run(void);             /* returns RC_CLEAN/RC_ERROR/RC_FATAL */
+
 /* ---- output.c (§9.1) ----
  * Every line devsoak prints goes through out_printf().  RawDoFmt formats;
  * the console sink line-buffers and Write()s on the CLI handle (LF endings,

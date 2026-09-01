@@ -277,7 +277,7 @@ main(int argc, char **argv)
         }
     }
 
-    out_printf("M1 skeleton: initialisation complete.");
+    rc = engine_run();
 
 cleanup_close:
     if (opened) {
