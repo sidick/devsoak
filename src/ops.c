@@ -57,6 +57,32 @@ static void fill_result(struct IOExtTD *io, struct Result *res,
 void op_build_rw(struct IOExtTD *io, ULONG dialect, ULONG is_write,
                   U64 byteoff, APTR data, ULONG len, ULONG changenum)
 {
+    /* A 32-bit dialect cannot express a transfer reaching past 4 GB --
+     * the (ULONG) cast below would silently land it ~4 GB low, OUTSIDE
+     * the test range. Upgrade to an enabled 64-bit dialect (ETD prefers
+     * NSCMD_ETD to keep the change-count semantics). Callers that
+     * deliberately want the raw 32-bit behaviour (the 4 GB wrap probe)
+     * must build the request by hand. */
+    if ((dialect == DIALECT_CMD || dialect == DIALECT_ETD) &&
+        byteoff + (U64)len > 0x100000000ULL) {
+        ULONG i, up = DIALECT_COUNT;
+
+        for (i = 0; i < g_n_enabled; i++) {
+            ULONG d = g_enabled_dialects[i];
+
+            if (dialect == DIALECT_ETD && d == DIALECT_NSDETD64) {
+                up = d;
+                break;
+            }
+            if (up == DIALECT_COUNT &&
+                (d == DIALECT_TD64 || d == DIALECT_NSD64 ||
+                 d == DIALECT_NSDETD64))
+                up = d;
+        }
+        if (up != DIALECT_COUNT)
+            dialect = up;
+    }
+
     io->iotd_Req.io_Data = data;
     io->iotd_Req.io_Length = len;
     io->iotd_Req.io_Flags = 0;
@@ -100,6 +126,23 @@ void op_build_rw(struct IOExtTD *io, ULONG dialect, ULONG is_write,
         io->iotd_Req.io_Actual = 0xa5a5a5a5UL;
         break;
     }
+}
+
+ULONG op_dialect_for(U64 byteoff, ULONG len)
+{
+    ULONG i;
+
+    if (byteoff + (U64)len <= 0x100000000ULL)
+        return DIALECT_CMD;
+
+    for (i = 0; i < g_n_enabled; i++) {
+        ULONG d = g_enabled_dialects[i];
+
+        if (d == DIALECT_TD64 || d == DIALECT_NSD64 ||
+            d == DIALECT_NSDETD64)
+            return d;
+    }
+    return DIALECT_COUNT;
 }
 
 void op_do_sync(struct IOExtTD *io, ULONG submit, struct Result *res)

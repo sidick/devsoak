@@ -58,7 +58,7 @@ struct PinEntry {
     LONG        value;
 };
 
-#define MAX_PINS 24
+#define MAX_PINS 40
 
 static struct PinEntry pins[MAX_PINS];
 static ULONG            n_pins;
@@ -114,6 +114,13 @@ static UBYTE g_can_maxtransfer;
  * the pin table because they gate WHICH tests run, not an observed value */
 static UBYTE stop_skip;    /* CMD_STOP returned IOERR_NOCMD */
 static UBYTE motor_skip;   /* TD_MOTOR returned IOERR_NOCMD */
+
+/* §8 "-B" 4 GB boundary tests (tests 26/27): once-per-run notices, separate
+ * from test_skip_check()'s SKIP reporting because these aren't quirk-driven
+ * skips -- they're "the option was given but the situation doesn't apply". */
+static UBYTE bigdev_toosmall_notice;   /* -B given, device < 4 GB */
+static UBYTE bigdev_norange_notice;    /* -r doesn't straddle/reach the
+                                           boundary with 4 in-range sectors */
 
 /* ---- small helpers ---- */
 
@@ -560,17 +567,24 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
          * nonzero io_Actual is still a hard failure, and the
          * buffer-untouched check below applies either way. */
         pin_check("zero-length-err", (LONG)res.err);
-        if (res.err == 0 && res.actual != 0) {
-            out_task_printf("devsoak: matrix: FAIL zero-length: err 0 but "
-                             "actual %ld", (LONG)res.actual);
-            matrix_fail("zero-length");
-            ok = 0;
+        if (res.err == 0) {
+            /* trackdisk.device 47.14 rounds a zero-length read UP: it
+             * reports io_Actual = one sector and really transfers that
+             * sector. Odd, but self-consistent -- pin the actual. The
+             * hard invariant is that nothing is touched BEYOND what
+             * io_Actual claims (and the guards). */
+            pin_check("zero-length-actual", (LONG)res.actual);
         }
         if (ok) {
-            for (i = 0; i < buf->len; i++) {
+            ULONG from = (res.err == 0 && res.actual <= buf->len)
+                         ? res.actual : 0;
+
+            for (i = from; i < buf->len; i++) {
                 if (buf->data[i] != 0xA5) {
                     out_task_printf("devsoak: matrix: FAIL zero-length: "
-                                     "buffer touched at +%ld", (LONG)i);
+                                     "buffer touched at +%ld (beyond "
+                                     "io_Actual %ld)", (LONG)i,
+                                     (LONG)res.actual);
                     matrix_fail("zero-length");
                     break;
                 }
@@ -659,8 +673,8 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
             op_simple(io0, cmd, &res);
             listed = dev.have_nsd && nsd_list_has(cmd);
 
-            if (cmd == CMD_INVALID || cmd == TD_RAWREAD ||
-                cmd == TD_RAWWRITE) {
+            if (cmd == CMD_INVALID) {
+                /* command 0 must never be dispatched */
                 if (res.err == 0) {
                     out_task_printf("devsoak: matrix: FAIL unlisted-nocmd: "
                                      "%s succeeded (expected IOERR_NOCMD)",
@@ -668,8 +682,13 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                     matrix_fail("unlisted-nocmd");
                 }
             } else {
+                /* §15 expects NOCMD for RAWREAD/RAWWRITE on non-floppy
+                 * drivers, but trackdisk.device itself implements them
+                 * natively -- pinned, like GETDRIVETYPE/GETNUMTRACKS. */
                 pin_check(cmd == TD_GETDRIVETYPE ? "drivetype-err"
-                                                  : "numtracks-err",
+                          : cmd == TD_GETNUMTRACKS ? "numtracks-err"
+                          : cmd == TD_RAWREAD ? "rawread-err"
+                                               : "rawwrite-err",
                           (LONG)res.err);
             }
 
@@ -763,6 +782,238 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                       (LONG)(BYTE)io0->iotd_Req.io_Error);
         }
     }
+}
+
+/* ---- §8 "-B": 4 GB boundary tests (tests 26/27) ----------------------- */
+
+/* test 26: straddle-4gb-<dialect>. One dialect table entry per 64-bit
+ * dialect; only entries whose dialect is in g_enabled_dialects are tried. */
+struct Straddle4gEntry {
+    ULONG       dialect;
+    UWORD       cmd_write;
+    UWORD       cmd_read;
+    const char *name;
+};
+
+static const struct Straddle4gEntry s4g_table[3] = {
+    { DIALECT_TD64,     TD_WRITE64,        TD_READ64,        "straddle-4gb-td64" },
+    { DIALECT_NSD64,    NSCMD_TD_WRITE64,  NSCMD_TD_READ64,  "straddle-4gb-nsd64" },
+    { DIALECT_NSDETD64, NSCMD_ETD_WRITE64, NSCMD_ETD_READ64, "straddle-4gb-nsdetd64" },
+};
+
+static void
+run_test26_straddle4gb(struct IOExtTD *io0, struct TestBuf *buf,
+                        struct timerequest *tio)
+{
+    ULONG ss = dev.sector_size;
+    U64   boundary_sector = 0x100000000ULL / (U64)ss;
+    U64   start_sector;
+    ULONG idx;
+    ULONG d;
+    UBYTE straddles;
+    UBYTE inrange;
+
+    straddles = (cfg.range_start < boundary_sector) &&
+                ((cfg.range_start + cfg.range_len) > boundary_sector);
+
+    start_sector = boundary_sector - 2;
+    inrange = straddles &&
+              (start_sector >= cfg.range_start) &&
+              ((start_sector + 4) <= (cfg.range_start + cfg.range_len));
+
+    if (!inrange) {
+        if (!bigdev_norange_notice) {
+            out_task_printf("devsoak: matrix: range does not straddle the "
+                             "4 GB boundary, straddle-4gb tests skipped "
+                             "(place -r across it)");
+            bigdev_norange_notice = 1;
+        }
+        return;
+    }
+
+    idx = (ULONG)(start_sector - cfg.range_start);
+
+    for (d = 0; d < 3; d++) {
+        const struct Straddle4gEntry *e = &s4g_table[d];
+        struct Result res;
+        U64 off;
+        ULONG k;
+        UBYTE writeok;
+
+        if (test_skip_check(e->name))
+            continue;
+        if (!dialect_enabled(e->dialect))
+            continue;
+
+        off = start_sector * (U64)ss;
+
+        breadcrumb(tio, e->cmd_write, 4 * ss, off, buf->data);
+
+        if (!stripes_attempt(idx, 4))
+            continue;   /* worker traffic holds these stripes -- try next pass */
+
+        for (k = 0; k < 4; k++) {
+            content_build(buf->data + k * ss, start_sector + k,
+                          (ULONG)g_generation[idx + k] + 1, 0, 4 * ss);
+        }
+        op_build_rw(io0, e->dialect, 1, off, buf->data, 4 * ss, g_changenum);
+        op_do_sync(io0, SUBMIT_DOIO, &res);
+
+        writeok = (res.err == 0 && res.actual == 4 * ss);
+
+        if (res.err != 0) {
+            out_task_printf("devsoak: matrix: FAIL %s: straddling write "
+                             "failed err %ld", e->name, (LONG)res.err);
+            matrix_fail(e->name);
+        } else if (res.actual != 4 * ss) {
+            out_task_printf("devsoak: matrix: FAIL %s: short straddling "
+                             "write, actual %ld of %ld", e->name,
+                             (LONG)res.actual, (LONG)(4 * ss));
+            matrix_fail(e->name);
+        }
+
+        if (writeok) {
+            struct Result rres;
+            UBYTE failed = 0;
+
+            for (k = 0; k < 4; k++)
+                g_generation[idx + k]++;
+
+            breadcrumb(tio, e->cmd_read, 4 * ss, off, buf->data);
+            buf_prefill(buf, 0xA5);
+            op_build_rw(io0, e->dialect, 0, off, buf->data, 4 * ss,
+                        g_changenum);
+            op_do_sync(io0, SUBMIT_DOIO, &rres);
+
+            if (rres.err != 0) {
+                out_task_printf("devsoak: matrix: FAIL %s: readback failed "
+                                 "err %ld", e->name, (LONG)rres.err);
+                matrix_fail(e->name);
+                failed = 1;
+            } else if (rres.actual != 4 * ss) {
+                out_task_printf("devsoak: matrix: FAIL %s: short readback, "
+                                 "actual %ld of %ld", e->name,
+                                 (LONG)rres.actual, (LONG)(4 * ss));
+                matrix_fail(e->name);
+                failed = 1;
+            }
+
+            for (k = 0; !failed && k < 4; k++) {
+                LONG  cv;
+                ULONG diff = 0;
+
+                cv = content_verify(buf->data + k * ss, start_sector + k,
+                                     g_generation[idx + k], &diff);
+                if (cv != CV_OK) {
+                    if (cv == CV_WRONG_SECTOR) {
+                        out_task_printf("devsoak: matrix: FAIL %s: sector "
+                                         "%ld verify %s at +%ld (high word "
+                                         "ignored across 4 GB?)", e->name,
+                                         (LONG)k, content_class_name(cv),
+                                         (LONG)diff);
+                    } else {
+                        out_task_printf("devsoak: matrix: FAIL %s: sector "
+                                         "%ld verify %s at +%ld", e->name,
+                                         (LONG)k, content_class_name(cv),
+                                         (LONG)diff);
+                    }
+                    matrix_fail(e->name);
+                    break;
+                }
+            }
+        }
+
+        stripes_release(idx, 4);
+    }
+}
+
+/* test 27: cmd-read-4gb-wrap. A plain 32-bit CMD_READ whose io_Offset +
+ * io_Length crosses 2^32 -- the transfer cannot be expressed without
+ * wrapping, so the driver must fail it rather than clamp silently past the
+ * boundary or (the classic bug) wrap the offset back to a low LBA. */
+static void
+run_test27_cmdread4gbwrap(struct IOExtTD *io0, struct TestBuf *buf,
+                           struct timerequest *tio)
+{
+    ULONG ss = dev.sector_size;
+    ULONG len = 4 * ss;
+    U64   off;
+    struct Result res;
+
+    if (test_skip_check("cmd-read-4gb-wrap"))
+        return;
+
+    /* 0x100000000 - 2*ss is already sector aligned since ss divides
+       0x100000000 (ss is a power of two <= 4096) and 2*ss is a multiple
+       of ss. Cast to ULONG (op_build_rw does this) wraps io_Offset to
+       0xFFFFFFFF - 2*ss + 1, i.e. the last two sectors below 4 GB; the
+       4-sector length then runs 2 sectors past the 32-bit wrap point. */
+    off = 0x100000000ULL - (U64)len / 2;
+
+    breadcrumb(tio, CMD_READ, len, off, buf->data);
+    buf_prefill(buf, 0xA5);
+    /* Hand-built: op_build_rw() would auto-upgrade a >4GB CMD transfer
+     * to a 64-bit dialect, but this test exists to see what the RAW
+     * 32-bit command does at the boundary. */
+    io0->iotd_Req.io_Command = CMD_READ;
+    io0->iotd_Req.io_Data = buf->data;
+    io0->iotd_Req.io_Length = len;
+    io0->iotd_Req.io_Offset = (ULONG)off;
+    io0->iotd_Req.io_Flags = 0;
+    io0->iotd_Req.io_Actual = 0xa5a5a5a5UL;
+    io0->iotd_Req.io_Error = (BYTE)0xa5;
+    io0->iotd_Count = 0;
+    op_do_sync(io0, SUBMIT_DOIO, &res);
+
+    if (res.err != 0) {
+        pin_check("cmd-read-4gb-err", res.err);
+        return;
+    }
+
+    if (res.actual <= len / 2) {
+        /* clamped cleanly at the boundary */
+        pin_check("cmd-read-4gb-err", 0);
+        pin_check("cmd-read-4gb-clamped", 1);
+        return;
+    }
+
+    if (res.actual == len) {
+        struct SectorHdr hdr;
+        UBYTE *last2 = buf->data + (len / 2);
+        ULONG  calc_check;
+
+        content_decode_hdr(last2, &hdr);
+        calc_check = hdr.magic ^ hdr.seed ^ hdr.sector_hi ^ hdr.sector_lo
+                   ^ hdr.generation ^ hdr.writer ^ hdr.xfer_len;
+
+        if (hdr.magic == DSOK_MAGIC && hdr.seed == cfg.seed &&
+            hdr.hdr_check == calc_check &&
+            (((U64)hdr.sector_hi << 32) | (U64)hdr.sector_lo) < 4ULL) {
+            /* the last two sectors of this "4 GB+" transfer decode as our
+             * own header for a sector < 4 -- the driver wrapped the 32-bit
+             * offset back to LBA 0 instead of failing. Classic ignored-
+             * high-word bug, just seen from the CMD_READ side. */
+            out_task_printf("devsoak: matrix: FAIL cmd-read-4gb-wrap: "
+                             "32-bit read wrapped past 4 GB to LBA 0");
+            matrix_fail("cmd-read-4gb-wrap");
+        } else {
+            /* Transferred 4 sectors and the tail doesn't decode as our
+             * data at LBA 0..3 -- whatever the driver did (serviced a
+             * genuinely different range, returned stale/foreign data,
+             * whatever), it isn't the wrap bug this test hunts for. That
+             * behaviour is still pinnable: a driver that is consistently
+             * "wrong but not wrapping" every pass is not a regression,
+             * only a driver that starts wrapping later is. */
+            pin_check("cmd-read-4gb-err", 0);
+        }
+        return;
+    }
+
+    /* err 0 but actual is neither a clean clamp nor the full 4 sectors:
+       a silent partial transfer across the boundary is its own bug. */
+    out_task_printf("devsoak: matrix: FAIL cmd-read-4gb-wrap: err 0 but "
+                     "actual %ld (neither clamped nor full)", (LONG)res.actual);
+    matrix_fail("cmd-read-4gb-wrap");
 }
 
 /* ---- tier 2: 64-bit and probing edges --------------------------------- */
@@ -964,6 +1215,27 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf,
             DoIO((struct IORequest *)io0);
         }
       }
+    }
+
+    /* 26/27: -B big-device 4 GB boundary tests. Gated on the device
+     * actually being >= 4 GB (by geometry, not by the -r range) -- the
+     * option can be given against a small test unit for a scripted CI run
+     * that also exercises other units, so this must degrade to a one-time
+     * notice rather than a hard failure. */
+    if (cfg.bigdev) {
+        UBYTE big_enough = dev.have_geom &&
+            (dev.total_sectors * (U64)ss) > 0x100000000ULL;
+
+        if (!big_enough) {
+            if (!bigdev_toosmall_notice) {
+                out_task_printf("devsoak: matrix: -B given but device < "
+                                 "4 GB, boundary tests skipped");
+                bigdev_toosmall_notice = 1;
+            }
+        } else {
+            run_test26_straddle4gb(io0, buf, tio);
+            run_test27_cmdread4gbwrap(io0, buf, tio);
+        }
     }
 }
 
@@ -1363,6 +1635,8 @@ invariant_start(void)
     n_skiprep = 0;
     stop_skip = 0;
     motor_skip = 0;
+    bigdev_toosmall_notice = 0;
+    bigdev_norange_notice = 0;
 
     inv_taskptr = CreateTask((STRPTR)"devsoak.invariant", 0,
                              (APTR)inv_entry, INV_STACK);

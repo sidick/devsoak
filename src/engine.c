@@ -367,12 +367,20 @@ fill_pass(void)
         U64   byteoff = cur * (U64)sector_size;
         ULONG i;
 
+        ULONG fdial = op_dialect_for(byteoff, piece_bytes);
+
+        if (fdial == DIALECT_COUNT) {
+            out_printf("devsoak: fill: range extends past 4 GB but no "
+                       "64-bit dialect is available");
+            return RC_FATAL;
+        }
+
         for (i = 0; i < piece_sectors; i++) {
             content_build(wbuf.data + (ULONG)i * sector_size, cur + i, 1, 0,
                           piece_bytes);
         }
 
-        op_build_rw(dev.io, DIALECT_CMD, 1, byteoff, wbuf.data, piece_bytes,
+        op_build_rw(dev.io, fdial, 1, byteoff, wbuf.data, piece_bytes,
                     g_changenum);
         op_do_sync(dev.io, SUBMIT_DOIO, &res);
         log_ring(0, dev.io->iotd_Req.io_Command, byteoff, piece_bytes,
@@ -445,6 +453,30 @@ engine_run(void)
     out_drain();
     if (rc != RC_CLEAN)
         goto done_stripes;
+
+    /* -X: HD_SCSICMD phase, main context, nothing else running yet */
+    if (cfg.scsicmd) {
+        rc = scsicmd_phase();
+        out_drain();
+        if (rc != RC_CLEAN)
+            goto done_stripes;
+    }
+
+    /* -R: removable-media phase; the medium may change under us, so the
+     * phase zeroes g_generation[] and we refill + re-audit afterwards */
+    if (cfg.removable) {
+        rc = removable_phase();
+        out_drain();
+        if (rc != RC_CLEAN)
+            goto done_stripes;
+        rc = fill_pass();
+        if (rc != 0)
+            goto done_stripes;
+        rc = audit_sweep("post-change audit");
+        out_drain();
+        if (rc != RC_CLEAN)
+            goto done_stripes;
+    }
 
     if (workers_start() != 0) {
         out_printf("devsoak: workers_start failed");

@@ -270,6 +270,12 @@ struct Result {
  * for ETD dialects. */
 void  op_build_rw(struct IOExtTD *io, ULONG dialect, ULONG is_write,
                   U64 byteoff, APTR data, ULONG len, ULONG changenum);
+/* Dialect that can address [byteoff, byteoff+len): DIALECT_CMD when it
+ * fits in 32 bits, else the first enabled 64-bit dialect from
+ * g_enabled_dialects, else DIALECT_COUNT (caller must skip/fail --
+ * a 32-bit io_Offset would silently truncate ~4GB down and land the
+ * transfer OUTSIDE the test range). */
+ULONG op_dialect_for(U64 byteoff, ULONG len);
 /* Submit + wait synchronously, fill res (including latency). */
 void  op_do_sync(struct IOExtTD *io, ULONG submit, struct Result *res);
 /* Housekeeping/no-data command via DoIO. */
@@ -428,6 +434,25 @@ ULONG invariant_errors(void);       /* matrix failures so far */
 ULONG invariant_warnings(void);     /* failures downgraded by `warn` quirks */
 ULONG invariant_passes(void);       /* completed full matrix passes */
 void  invariant_print_pins(void);   /* main-only: end-of-run pin summary */
+
+/* ---- scsicmd.c (§8 HD_SCSICMD, -X): one-shot phase, main context,
+ * run after the initial audit and before workers start (no stripe
+ * locking needed -- nothing else is running). Returns RC_CLEAN/RC_ERROR;
+ * a driver without HD_SCSICMD (IOERR_NOCMD) reports and returns
+ * RC_CLEAN (the option asked for tests the driver cannot take). */
+
+LONG scsicmd_phase(void);
+
+/* ---- removable.c (§8 change interrupts, -R): one-shot phase, main
+ * context, after the initial audit and before workers. Installs three
+ * TD_ADDCHANGEINT handlers, drives (or prompts for) an eject/insert
+ * cycle, checks all three fire + CHANGENUM increments + ETD fails
+ * TDERR_DiskChanged while no disk is present, then TD_REMCHANGEINT and
+ * a second cycle to prove delivery stopped. Zeroes g_generation[]
+ * before returning (medium may have been swapped); the engine refills
+ * and re-audits afterwards. Updates g_changenum. */
+
+LONG removable_phase(void);
 
 /* ---- audit.c (§6): periodic full-range sweeps ---- */
 
