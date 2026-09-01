@@ -370,6 +370,47 @@ ULONG workers_dead(void);           /* count of error-stopped workers */
  * worker/cmd if wanted (may pass NULL) */
 ULONG workers_oldest_secs(ULONG *worker, ULONG *cmd);
 
+/* ---- quirks.c (§16): data-driven known-driver behaviours ----
+ * Plain-text file (default "devsoak.quirks" beside the binary or in the
+ * current dir), parsed by main (a Process) after the device identity is
+ * known. Only `status confirmed` entries auto-apply; -k ID forces others
+ * on; -K ignores the file entirely (driver-under-test mode). All query
+ * functions are read-only after quirks_load() and callable from any
+ * task. Skipped commands/tests are reported once ("SKIP ... (quirk id)")
+ * by quirks_report() and counted in the summary. */
+
+LONG  quirks_load(void);            /* 0 ok (incl. "no file"); main only */
+void  quirks_cleanup(void);
+ULONG quirks_active(void);          /* number of applied entries */
+void  quirks_report(void);          /* main: applied ids + skip summary */
+/* per-command actions */
+ULONG quirk_cmd_skipped(UWORD cmd);            /* `skip CMD...` */
+LONG  quirk_expected_err(UWORD cmd, LONG *e);  /* `expect CMD ERR`: 1+err */
+/* per-§8-test actions (names = invariant.c test names) */
+ULONG quirk_test_skipped(const char *test);    /* `skiptest TEST` */
+ULONG quirk_test_warn(const char *test);       /* `warn TEST` */
+/* global caps */
+ULONG quirk_min_align(void);        /* `align N` bytes; 0 = no floor */
+ULONG quirk_nochip(void);           /* `nochip` */
+ULONG quirk_maxinflight(void);      /* `maxinflight N`; 0 = unlimited */
+ULONG quirk_maxxfer(void);          /* `maxxfer BYTES`; 0 = no cap */
+ULONG quirk_norandomcmd(void);      /* `norandomcmd` */
+LONG  quirk_tier(void);             /* `tier N`; -1 = no override */
+/* §16.4 crash-crumb file (-P): main-context helpers */
+LONG  crumb_open(void);             /* open/append cfg.crumbfile; 0 ok */
+void  crumb_write(const char *line);/* append + flush; main only */
+void  crumb_close(void);
+/* --resume: read cfg.crumbfile, report the suspect last command and
+ * print a ready-made `status suspected` quirk block. Returns RC_*. */
+LONG  quirks_resume_report(void);
+
+/* §16.4 cross-task crumb handshake: a task about to first-issue a
+ * tier-2/3 command (the invariant task) publishes the breadcrumb line
+ * here and waits (bounded) for main to persist it via crumb_write();
+ * main services this from its status loop. No-ops when -P is unset. */
+extern volatile UBYTE g_crumb_pending;
+extern char           g_crumb_text[200];
+
 /* ---- invariant.c (§8/§16.3): continuous edge-case matrix ----
  * A dedicated task (pri 0, own port/requests/buffer) runs the named §8
  * tests in risk-tier order (0 -> 1 -> 2, tier 3 only with -Z), a full
@@ -384,6 +425,7 @@ void  invariant_request_stop(void);
 void  invariant_wait_done(void);
 void  invariant_cleanup(void);
 ULONG invariant_errors(void);       /* matrix failures so far */
+ULONG invariant_warnings(void);     /* failures downgraded by `warn` quirks */
 ULONG invariant_passes(void);       /* completed full matrix passes */
 void  invariant_print_pins(void);   /* main-only: end-of-run pin summary */
 

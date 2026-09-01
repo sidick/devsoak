@@ -146,6 +146,24 @@ elapsed_usec(ULONG s0, ULONG u0, ULONG s1, ULONG u1)
     return (ULONG)total;
 }
 
+/* actual command number a dialect/direction pair will issue -- used to
+   check quirk_cmd_skipped() against the real wire command, not just the
+   dialect as a whole (asymmetric skips like "skip TD_WRITE64 only"). */
+static UWORD
+dialect_cmd(ULONG dialect, UBYTE is_write)
+{
+    switch (dialect) {
+    case DIALECT_CMD:      return is_write ? CMD_WRITE : CMD_READ;
+    case DIALECT_ETD:      return is_write ? ETD_WRITE : ETD_READ;
+    case DIALECT_TD64:     return is_write ? TD_WRITE64 : TD_READ64;
+    case DIALECT_NSD64:    return is_write ? NSCMD_TD_WRITE64
+                                            : NSCMD_TD_READ64;
+    case DIALECT_NSDETD64: return is_write ? NSCMD_ETD_WRITE64
+                                            : NSCMD_ETD_READ64;
+    default:               return CMD_READ;
+    }
+}
+
 static void
 report_failure(struct WorkerPriv *w, const char *what, UWORD cmd,
                U64 byteoff, ULONG len, LONG err, ULONG actual)
@@ -299,10 +317,23 @@ worker_init_resources(ULONG idx)
 
     for (j = 0; j < g_qdepth; j++) {
         ULONG alignsel = j % 4;
+        ULONG minalign = quirk_min_align();
         LONG  bufrc;
 
+        /* honour `align N`: never use a variant weaker than the floor.
+           ALIGN_CROSS4K is longword-aligned already, so it is never
+           remapped. */
+        if (minalign >= 4) {
+            if (alignsel == ALIGN_ODD || alignsel == ALIGN_WORD)
+                alignsel = ALIGN_LONG;
+        } else if (minalign >= 2) {
+            if (alignsel == ALIGN_ODD)
+                alignsel = ALIGN_LONG;
+        }
+
         if (j == 1 && g_qdepth > 1 && dev.have_geom &&
-            dev.geom.dg_BufMemType != 0) {
+            dev.geom.dg_BufMemType != 0 &&
+            !(quirk_nochip() && (dev.geom.dg_BufMemType & MEMF_CHIP))) {
             ULONG special = dev.geom.dg_BufMemType | MEMF_PUBLIC;
 
             bufrc = buf_alloc(&w->buf[j], g_chunk_bytes, alignsel, special);
@@ -389,20 +420,22 @@ do_housekeeping(struct WorkerPriv *w, ULONG qi)
     ULONG k;
 
     for (k = 0; k < 5; k++)
-        if (!hk_disabled[k])
+        if (!hk_disabled[k] && !quirk_cmd_skipped(hk_cmds[k]))
             any_enabled = 1;
     if (!any_enabled)
-        return;   /* every hk command NOCMD'd -- nothing safe left to send */
+        return;   /* every hk command NOCMD'd/quirk-skipped -- nothing safe
+                     left to send */
 
     for (tries = 0; tries < 5; tries++) {
         pick = xs32(&w->pub.rng) % 5;
-        if (!hk_disabled[pick]) {
+        if (!hk_disabled[pick] && !quirk_cmd_skipped(hk_cmds[pick])) {
             cmd = hk_cmds[pick];
             break;
         }
     }
-    if (hk_disabled[pick])
-        return;   /* picked disabled 5 times running -- skip this round */
+    if (hk_disabled[pick] || quirk_cmd_skipped(hk_cmds[pick]))
+        return;   /* picked disabled/skipped 5 times running -- skip this
+                     round */
 
     Forbid();
     w->pub.slots[qi].active = 1;
@@ -642,6 +675,24 @@ process_completion(struct WorkerPriv *w, ULONG qi)
     res.usec   = elapsed_usec(w->pub.slots[qi].submit_secs, w->submit_u[qi],
                               s1, u1);
 
+    {
+        LONG e;
+
+        if (res.err != 0 && quirk_expected_err(cmd, &e) && res.err == e) {
+            /* The driver correctly refused this op: a benign no-op, not a
+               bug -- don't touch g_generation, don't verify, don't
+               report. */
+            log_ring(w, cmd, byteoff, bytes, io->iotd_Req.io_Data, &res);
+            stats_record(is_write ? CLASS_WRITE : CLASS_READ, 0, res.usec, 0);
+            stripes_release(start_idx, nsect);
+            Forbid();
+            w->pub.slots[qi].active = 0;
+            Permit();
+            w->pub.inflight--;
+            return;
+        }
+    }
+
     if (res.err == IOERR_ABORTED) {
         handle_abort(w, qi, cmd, byteoff, bytes, start_idx, nsect, is_write,
                     &res);
@@ -842,6 +893,36 @@ start_one_op(struct WorkerPriv *w)
                 }
             }
 
+            /* Belt-and-braces: engine.c already excludes skipped dialects
+               from g_enabled_dialects at probe time, but that check is
+               keyed on the READ command per dialect (S16.4/engine.c
+               setup()), so an asymmetric skip (e.g. "skip TD_WRITE64
+               only") would still let a write through here. Re-pick a
+               dialect that isn't skipped for THIS op's actual command. */
+            if (quirk_cmd_skipped(dialect_cmd(dialect, is_write))) {
+                ULONG d3;
+                UBYTE found2 = 0;
+
+                for (d3 = 0; d3 < g_n_enabled; d3++) {
+                    ULONG cand2 = g_enabled_dialects[d3];
+                    UBYTE cand_is32 = (cand2 == DIALECT_CMD ||
+                                       cand2 == DIALECT_ETD) ? 1 : 0;
+
+                    if (cand_is32 &&
+                        (byteoff + (U64)bytes) > 0x100000000ULL)
+                        continue;
+                    if (quirk_cmd_skipped(dialect_cmd(cand2, is_write)))
+                        continue;
+                    dialect = cand2;
+                    found2 = 1;
+                    break;
+                }
+                if (!found2) {
+                    stripes_release(start_idx, nsect);
+                    return 0;
+                }
+            }
+
             {
                 ULONG k;
                 UBYTE *base = w->buf[qi].data;
@@ -1010,6 +1091,23 @@ workers_start(void)
         out_task_printf("devsoak: -q %ld clamped to %ld (MAX_QDEPTH)",
                         (LONG)want_qdepth, (LONG)MAX_QDEPTH);
         want_qdepth = MAX_QDEPTH;
+    }
+
+    {
+        ULONG cap = quirk_maxinflight();
+
+        if (cap != 0 && want_workers * want_qdepth > cap) {
+            ULONG orig_w = want_workers, orig_q = want_qdepth;
+
+            while (want_qdepth > 1 && want_workers * want_qdepth > cap)
+                want_qdepth--;
+            while (want_workers > 1 && want_workers * want_qdepth > cap)
+                want_workers--;
+            out_task_printf("devsoak: quirk caps total inflight to %ld: "
+                            "workers %ld->%ld qdepth %ld->%ld",
+                            (LONG)cap, (LONG)orig_w, (LONG)want_workers,
+                            (LONG)orig_q, (LONG)want_qdepth);
+        }
     }
 
     g_num_workers = want_workers;

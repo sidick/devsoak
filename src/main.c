@@ -90,6 +90,14 @@ main(int argc, char **argv)
         return RC_FATAL;
     }
 
+    /* --resume (§16.4): report the crash suspect from -P FILE, no run */
+    if (cfg.resume) {
+        rc = quirks_resume_report();
+        timer_cleanup();
+        out_cleanup();
+        return rc;
+    }
+
     if (!cfg.seed_given) {
         timer_gettime(&s0, &u0);
         cfg.seed = s0 ^ u0;
@@ -206,6 +214,12 @@ main(int argc, char **argv)
         }
     }
 
+    /* quirks (§16): needs the driver identity captured above */
+    if (quirks_load() != 0) {
+        rc = RC_FATAL;
+        goto cleanup_close;
+    }
+
     /* validate range against device size */
     if (cfg.range_len == 0) {
         out_printf("devsoak: -r LEN must be nonzero");
@@ -277,7 +291,16 @@ main(int argc, char **argv)
         }
     }
 
+    if (crumb_open() != 0) {
+        out_printf("devsoak: cannot open -P file %s", cfg.crumbfile);
+        rc = RC_FATAL;
+        goto cleanup_close;
+    }
+
     rc = engine_run();
+
+    crumb_close();
+    quirks_cleanup();
 
 cleanup_close:
     if (opened) {

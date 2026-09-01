@@ -210,6 +210,20 @@ setup(void)
     if (try_bytes < sector_size)
         try_bytes = sector_size;
 
+    {
+        ULONG qmax = quirk_maxxfer();
+
+        if (qmax != 0 && qmax < try_bytes) {
+            ULONG capped = qmax - (qmax % sector_size);
+
+            if (capped < sector_size)
+                capped = sector_size;
+            out_printf("devsoak: quirk caps maxxfer to %ld bytes (was %ld)",
+                        (LONG)capped, (LONG)try_bytes);
+            try_bytes = capped;
+        }
+    }
+
     for (;;) {
         if (buf_alloc(&wbuf, try_bytes, ALIGN_LONG, MEMF_PUBLIC) == 0) {
             g_chunk_bytes = try_bytes;
@@ -239,6 +253,10 @@ setup(void)
      * invariant matrix). Probing reads into wbuf -- fine, fill_pass()
      * hasn't put anything worth keeping in it yet. */
     g_n_enabled = 0;
+    if (quirk_cmd_skipped(CMD_READ)) {
+        out_printf("devsoak: warning: quirk skips CMD_READ; ignoring "
+                   "(CMD dialect is never skippable)");
+    }
     g_enabled_dialects[g_n_enabled++] = DIALECT_CMD;
     {
         struct {
@@ -263,8 +281,21 @@ setup(void)
         cand[3].candidate = cand[3].listed;
 
         for (c = 0; c < 4; c++) {
+            UWORD readcmd;
+
             if (!cand[c].candidate)
                 continue;
+
+            readcmd = (cand[c].dialect == DIALECT_ETD) ? ETD_READ :
+                      (cand[c].dialect == DIALECT_TD64) ? TD_READ64 :
+                      (cand[c].dialect == DIALECT_NSD64) ? NSCMD_TD_READ64 :
+                                                            NSCMD_ETD_READ64;
+            if (quirk_cmd_skipped(readcmd)) {
+                out_printf("devsoak: SKIP dialect %s (quirk)",
+                            dialect_name(cand[c].dialect));
+                continue;
+            }
+
             op_build_rw(dev.io, cand[c].dialect, 0,
                         cfg.range_start * (U64)sector_size,
                         wbuf.data, sector_size, g_changenum);
@@ -456,6 +487,11 @@ engine_run(void)
         for (;;) {
             ULONG age, wid, wcmd;
 
+            if (g_crumb_pending) {
+                crumb_write(g_crumb_text);
+                g_crumb_pending = 0;
+            }
+
             out_drain();
             timer_delay_ms(250);
 
@@ -568,9 +604,11 @@ engine_run(void)
         invariant_cleanup();
         auditor_cleanup();
 
-        out_printf("devsoak: matrix: %ld full passes, %ld failures",
-                    (LONG)invariant_passes(), (LONG)invariant_errors());
+        out_printf("devsoak: matrix: %ld full passes, %ld failures, %ld warnings",
+                    (LONG)invariant_passes(), (LONG)invariant_errors(),
+                    (LONG)invariant_warnings());
         invariant_print_pins();
+        quirks_report();
 
         stats_snapshot(&fsnap);
 
@@ -579,7 +617,11 @@ engine_run(void)
             rc = RC_ERROR;
         else if (ctrlc_break)
             rc = RC_WARN;
-        else
+        else if (invariant_warnings() != 0) {
+            out_printf("devsoak: warnings only (quirk-downgraded matrix "
+                       "failures)");
+            rc = RC_WARN;
+        } else
             rc = RC_CLEAN;
     }
 
@@ -594,7 +636,8 @@ done_minimal:
     if (rc == RC_CLEAN)
         out_printf("devsoak: RESULT PASS");
     else if (rc == RC_WARN)
-        out_printf("devsoak: RESULT WARN (run cut short) rc=%ld", (LONG)rc);
+        out_printf("devsoak: RESULT WARN rc=%ld%s", (LONG)rc,
+                    ctrlc_break ? " (run cut short)" : " (warnings only)");
     else
         out_printf("devsoak: RESULT FAIL rc=%ld", (LONG)rc);
     return rc;

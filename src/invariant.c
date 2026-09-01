@@ -87,7 +87,21 @@ static volatile UBYTE  inv_stop;
 static volatile UBYTE  inv_done;
 static UBYTE            inv_active;
 static ULONG            inv_errors;
+static ULONG            inv_warnings;
 static ULONG            inv_passes;
+
+/* ---- §16.2 `skiptest`: print "SKIP <test> (quirk)" once per run per
+ * test; quirks_report() covers the id-level detail, this is just the
+ * once-only runtime notice. ---- */
+
+struct SkipReport {
+    const char *name;
+};
+
+#define MAX_SKIP_TESTS 32
+
+static struct SkipReport skiprep[MAX_SKIP_TESTS];
+static ULONG              n_skiprep;
 
 /* handshake, exactly auditor_start()/auditor_entry()'s pattern */
 static struct Task *hs_main_task;
@@ -133,6 +147,46 @@ matrix_fail_bump(void)
     stats_record(CLASS_HK, 0, 0, -1);
 }
 
+/* Every §8 test failure (other than a pin violation -- see pin_check()'s
+ * comment below for why those are never downgradable) goes through here
+ * instead of the bare matrix_fail_bump(): a `warn TEST` quirk downgrades
+ * it to a counted warning instead of a hard error. The FAIL detail line
+ * is still printed by the caller before this is called. */
+static void
+matrix_fail(const char *test)
+{
+    if (quirk_test_warn(test)) {
+        inv_warnings++;
+        out_task_printf("devsoak: matrix: WARN (downgraded by quirk) %s",
+                        test);
+    } else {
+        matrix_fail_bump();
+    }
+}
+
+/* §16.2 `skiptest`: returns 1 (and prints the SKIP notice, once per run)
+ * if the named test should not run at all this pass. */
+static UBYTE
+test_skip_check(const char *name)
+{
+    ULONG i;
+
+    if (!quirk_test_skipped(name))
+        return 0;
+
+    for (i = 0; i < n_skiprep; i++) {
+        if (strcmp(skiprep[i].name, name) == 0)
+            return 1;   /* already reported this run */
+    }
+
+    if (n_skiprep < MAX_SKIP_TESTS) {
+        skiprep[n_skiprep].name = name;
+        n_skiprep++;
+    }
+    out_task_printf("devsoak: matrix: SKIP %s (quirk)", name);
+    return 1;
+}
+
 /* pin_check(): first observation wins; every later call must match it.
  * Returns 0 if consistent (including "just pinned"), 1 on a violation
  * (already bumped the error counter). */
@@ -165,15 +219,85 @@ pin_check(const char *name, LONG observed)
     return 0;
 }
 
-/* §16.4: before the FIRST issue of a distinct tier-2/3 command this run,
- * announce it on the serial sink unconditionally. off is rendered via
- * u64_to_str() since RawDoFmt (which out_serial_line uses) has no 64-bit
- * support. */
+/* forward decl: defined near the task entry point, needed by crumb_sync()
+   below for the -P handshake's bounded wait. */
+static void inv_sleep_1s(struct timerequest *tio);
+
+/* Bounded strcat: appends as much of src as fits in dst's remaining
+ * space (dstsize includes room for the NUL), never overruns. */
 static void
-breadcrumb(UWORD cmd, ULONG len, U64 off, APTR data)
+bounded_strcat(char *dst, ULONG dstsize, const char *src)
+{
+    ULONG dlen = strlen(dst);
+    ULONG slen;
+    ULONG avail;
+
+    if (dstsize == 0 || dlen >= dstsize - 1)
+        return;
+    avail = dstsize - 1 - dlen;
+    slen = strlen(src);
+    if (slen > avail)
+        slen = avail;
+    memcpy(dst + dlen, src, slen);
+    dst[dlen + slen] = '\0';
+}
+
+/* Assemble "about to send <name> len=<n> off=<o>" by hand -- no RawDoFmt
+ * (this text goes to the -P crumb file via crumb_write(), not through the
+ * output layer). */
+static void
+build_crumb_line(char *out, ULONG outsize, UWORD cmd, ULONG len, U64 off)
+{
+    char numbuf[24];
+
+    if (outsize == 0)
+        return;
+    out[0] = '\0';
+    bounded_strcat(out, outsize, "about to send ");
+    bounded_strcat(out, outsize, op_cmd_name(cmd));
+    bounded_strcat(out, outsize, " len=");
+    u64_to_str((U64)len, numbuf);
+    bounded_strcat(out, outsize, numbuf);
+    bounded_strcat(out, outsize, " off=");
+    u64_to_str(off, numbuf);
+    bounded_strcat(out, outsize, numbuf);
+}
+
+/* §16.4 -P handshake: publish the crumb line and wait (bounded) for main
+ * to persist it via crumb_write() -- main services this from its status
+ * loop every 250 ms, so normally one 1 s sleep is more than enough; cap
+ * at 5 so a main that is itself stuck (or -P unset) never wedges this
+ * task. No-op when -P is unset. */
+static void
+crumb_sync(struct timerequest *tio, const char *line)
+{
+    ULONG n;
+    ULONG len;
+
+    if (cfg.crumbfile == NULL)
+        return;
+
+    len = strlen(line);
+    if (len > sizeof(g_crumb_text) - 1)
+        len = sizeof(g_crumb_text) - 1;
+    memcpy(g_crumb_text, line, len);
+    g_crumb_text[len] = '\0';
+    g_crumb_pending = 1;
+
+    for (n = 0; n < 5 && g_crumb_pending && !inv_stop; n++)
+        inv_sleep_1s(tio);
+}
+
+/* §16.4: before the FIRST issue of a distinct tier-2/3 command this run,
+ * announce it on the serial sink unconditionally, and (with -P) hand it
+ * to main for the crumb file. off is rendered via u64_to_str() since
+ * RawDoFmt (which out_serial_line uses) has no 64-bit support. */
+static void
+breadcrumb(struct timerequest *tio, UWORD cmd, ULONG len, U64 off, APTR data)
 {
     ULONG i;
     char  offbuf[24];
+    char  crumbline[200];
 
     for (i = 0; i < n_bc; i++) {
         if (bc[i].cmd == cmd) {
@@ -184,6 +308,8 @@ breadcrumb(UWORD cmd, ULONG len, U64 off, APTR data)
             out_serial_line("devsoak: about to send %s(0x%lx) len=%ld off=%s data=0x%lx",
                              op_cmd_name(cmd), (ULONG)cmd, (LONG)len, offbuf,
                              (ULONG)data);
+            build_crumb_line(crumbline, sizeof(crumbline), cmd, len, off);
+            crumb_sync(tio, crumbline);
             return;
         }
     }
@@ -196,6 +322,8 @@ breadcrumb(UWORD cmd, ULONG len, U64 off, APTR data)
         out_serial_line("devsoak: about to send %s(0x%lx) len=%ld off=%s data=0x%lx",
                          op_cmd_name(cmd), (ULONG)cmd, (LONG)len, offbuf,
                          (ULONG)data);
+        build_crumb_line(crumbline, sizeof(crumbline), cmd, len, off);
+        crumb_sync(tio, crumbline);
     }
     /* table full: extremely unlikely given the small fixed set of real
        tier-2/3 commands issued below -- silently skip the breadcrumb
@@ -233,7 +361,7 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
 
     /* 1 + 7: read-last-sector / actual-eq-length / io_Error stale-value
      * catch (io_Error prefilled 0xa5 by op_build_rw). */
-    if (dev.have_geom) {
+    if (dev.have_geom && !test_skip_check("read-last-sector")) {
         U64 off = (dev.total_sectors - 1) * (U64)ss;
         struct Result res;
 
@@ -245,12 +373,12 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                              op_cmd_name(io0->iotd_Req.io_Command),
                              (LONG)(off & 0xFFFFFFFFUL), (LONG)ss,
                              (LONG)res.err, (LONG)res.actual);
-            matrix_fail_bump();
+            matrix_fail("read-last-sector");
         }
     }
 
     /* 2: geometry-stable */
-    if (dev.have_geom) {
+    if (dev.have_geom && !test_skip_check("geometry-stable")) {
         struct DriveGeometry g2;
 
         memset(&g2, 0, sizeof(g2));
@@ -267,16 +395,16 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
             out_task_printf("devsoak: matrix: FAIL geometry-stable: "
                              "TD_GETGEOMETRY err %ld",
                              (LONG)io0->iotd_Req.io_Error);
-            matrix_fail_bump();
+            matrix_fail("geometry-stable");
         } else if (memcmp(&g2, &dev.geom, sizeof(g2)) != 0) {
             out_task_printf("devsoak: matrix: FAIL geometry-stable: "
                              "snapshot changed since startup");
-            matrix_fail_bump();
+            matrix_fail("geometry-stable");
         }
     }
 
     /* 3: changestate-constant */
-    {
+    if (!test_skip_check("changestate-constant")) {
         struct Result res;
 
         op_simple(io0, TD_CHANGESTATE, &res);
@@ -285,7 +413,7 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
     }
 
     /* 4: protstatus-constant (+ write-protect sub-test) */
-    {
+    if (!test_skip_check("protstatus-constant")) {
         struct Result res;
 
         op_simple(io0, TD_PROTSTATUS, &res);
@@ -308,7 +436,7 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                                         "protected device err %ld "
                                         "(expected TDERR_WriteProt)",
                                         (LONG)wres.err);
-                        matrix_fail_bump();
+                        matrix_fail("protstatus-constant");
                     }
                     stripes_release(0, 1);
                 }
@@ -317,7 +445,7 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
     }
 
     /* 5: nsd-query-stable */
-    if (dev.have_nsd) {
+    if (dev.have_nsd && !test_skip_check("nsd-query-stable")) {
         struct NSDQueryResult nsdq;
         ULONG n = 0;
 
@@ -335,7 +463,7 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
             out_task_printf("devsoak: matrix: FAIL nsd-query-stable: "
                              "DEVICEQUERY err %ld",
                              (LONG)io0->iotd_Req.io_Error);
-            matrix_fail_bump();
+            matrix_fail("nsd-query-stable");
         } else {
             if (nsdq.SupportedCommands != NULL) {
                 while (n < 63 && nsdq.SupportedCommands[n] != 0)
@@ -349,13 +477,13 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                                  "devtype %ld (was %ld) ncmds %ld (was %ld)",
                                  (LONG)nsdq.DeviceType, (LONG)dev.nsd_devtype,
                                  (LONG)n, (LONG)dev.nsd_ncmds);
-                matrix_fail_bump();
+                matrix_fail("nsd-query-stable");
             }
         }
     }
 
     /* 6: quick-flag */
-    if (stripes_attempt(0, 1)) {
+    if (!test_skip_check("quick-flag") && stripes_attempt(0, 1)) {
         struct Result res;
 
         buf_prefill(buf, 0xA5);
@@ -377,7 +505,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
     (void)io1;
 
     /* 8: read-past-end */
-    if (dev.have_geom) {
+    if (dev.have_geom && !test_skip_check("read-past-end")) {
         U64 off = dev.total_sectors * (U64)ss;
         struct Result res;
 
@@ -387,7 +515,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
             out_task_printf("devsoak: matrix: FAIL read-past-end: silently "
                              "succeeded, off_lo %ld",
                              (LONG)(off & 0xFFFFFFFFUL));
-            matrix_fail_bump();
+            matrix_fail("read-past-end");
         } else {
             pin_check("past-end-err", (LONG)res.err);
         }
@@ -395,7 +523,8 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
 
     /* 9: straddle-end (read-only, per brief: those sectors are normally
      * outside the range so no write variant is attempted) */
-    if (dev.have_geom && dev.total_sectors >= 4) {
+    if (dev.have_geom && dev.total_sectors >= 4 &&
+        !test_skip_check("straddle-end")) {
         U64   off = (dev.total_sectors - 2) * (U64)ss;
         ULONG len = 4 * ss;
         struct Result res;
@@ -405,17 +534,17 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         if (res.err == 0) {
             out_task_printf("devsoak: matrix: FAIL straddle-end: silently "
                              "succeeded");
-            matrix_fail_bump();
+            matrix_fail("straddle-end");
         } else if (res.actual > 2 * ss) {
             out_task_printf("devsoak: matrix: FAIL straddle-end: io_Actual "
                              "not clamped, actual %ld expected <= %ld",
                              (LONG)res.actual, (LONG)(2 * ss));
-            matrix_fail_bump();
+            matrix_fail("straddle-end");
         }
     }
 
     /* 10: zero-length */
-    {
+    if (!test_skip_check("zero-length")) {
         struct Result res;
         UBYTE ok = 1;
         ULONG i;
@@ -434,7 +563,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         if (res.err == 0 && res.actual != 0) {
             out_task_printf("devsoak: matrix: FAIL zero-length: err 0 but "
                              "actual %ld", (LONG)res.actual);
-            matrix_fail_bump();
+            matrix_fail("zero-length");
             ok = 0;
         }
         if (ok) {
@@ -442,20 +571,20 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 if (buf->data[i] != 0xA5) {
                     out_task_printf("devsoak: matrix: FAIL zero-length: "
                                      "buffer touched at +%ld", (LONG)i);
-                    matrix_fail_bump();
+                    matrix_fail("zero-length");
                     break;
                 }
             }
             if (buf_check_guards(buf) != 0) {
                 out_task_printf("devsoak: matrix: FAIL zero-length: guard "
                                  "overrun");
-                matrix_fail_bump();
+                matrix_fail("zero-length");
             }
         }
     }
 
     /* 11: unaligned-length + unaligned-offset */
-    {
+    if (!test_skip_check("unaligned-length")) {
         struct Result res;
 
         op_build_rw(io0, DIALECT_CMD, 0, cfg.range_start * (U64)ss,
@@ -467,7 +596,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
          * (0 = accepted). Writes never use unaligned lengths here. */
         pin_check("unaligned-len-err", (LONG)res.err);
     }
-    {
+    if (!test_skip_check("unaligned-offset")) {
         struct Result res;
         U64 off = cfg.range_start * (U64)ss + 1;
 
@@ -483,7 +612,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
     /* 12: maxtransfer -- only when the task buffer is big enough to read
      * one sector past MaxTransfer (g_can_maxtransfer, set once at task
      * start; a "skipped, no buffer" note is printed once there too). */
-    if (g_can_maxtransfer) {
+    if (g_can_maxtransfer && !test_skip_check("maxtransfer")) {
         ULONG len = g_chunk_bytes + ss;             /* one sector over MaxTransfer */
         ULONG range_bytes = (ULONG)cfg.range_len * ss;
         struct Result res;
@@ -504,7 +633,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 out_task_printf("devsoak: matrix: FAIL maxtransfer: silent "
                                  "partial, err 0 actual %ld of %ld",
                                  (LONG)res.actual, (LONG)len);
-                matrix_fail_bump();
+                matrix_fail("maxtransfer");
             } else {
                 pin_check("maxxfer-over", 0);    /* rejected (cleanly or not) */
             }
@@ -512,7 +641,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
     }
 
     /* 13: unlisted-nocmd (+ NSD cross-check for these five) */
-    {
+    if (!test_skip_check("unlisted-nocmd")) {
         static const UWORD cmds5[5] = {
             CMD_INVALID, TD_GETDRIVETYPE, TD_GETNUMTRACKS, TD_RAWREAD,
             TD_RAWWRITE
@@ -524,6 +653,9 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
             struct Result res;
             UBYTE listed;
 
+            if (quirk_cmd_skipped(cmd))
+                continue;
+
             op_simple(io0, cmd, &res);
             listed = dev.have_nsd && nsd_list_has(cmd);
 
@@ -533,7 +665,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                     out_task_printf("devsoak: matrix: FAIL unlisted-nocmd: "
                                      "%s succeeded (expected IOERR_NOCMD)",
                                      op_cmd_name(cmd));
-                    matrix_fail_bump();
+                    matrix_fail("unlisted-nocmd");
                 }
             } else {
                 pin_check(cmd == TD_GETDRIVETYPE ? "drivetype-err"
@@ -545,42 +677,46 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 if (listed && res.err == IOERR_NOCMD) {
                     out_task_printf("devsoak: matrix: FAIL unlisted-nocmd: "
                                      "%s listed but NOCMD", op_cmd_name(cmd));
-                    matrix_fail_bump();
+                    matrix_fail("unlisted-nocmd");
                 } else if (!listed && res.err == 0) {
                     out_task_printf("devsoak: matrix: FAIL unlisted-nocmd: "
                                      "%s not listed but implemented",
                                      op_cmd_name(cmd));
-                    matrix_fail_bump();
+                    matrix_fail("unlisted-nocmd");
                 }
             }
         }
     }
 
     /* 14: hk-benign */
-    {
+    if (!test_skip_check("hk-benign")) {
         struct Result res;
 
-        op_simple(io0, CMD_UPDATE, &res);
-        if (res.err != 0 && res.err != IOERR_NOCMD) {
-            out_task_printf("devsoak: matrix: FAIL hk-benign: CMD_UPDATE "
-                             "err %ld", (LONG)res.err);
-            matrix_fail_bump();
-        } else {
-            pin_check("update-err", (LONG)res.err);
+        if (!quirk_cmd_skipped(CMD_UPDATE)) {
+            op_simple(io0, CMD_UPDATE, &res);
+            if (res.err != 0 && res.err != IOERR_NOCMD) {
+                out_task_printf("devsoak: matrix: FAIL hk-benign: CMD_UPDATE "
+                                 "err %ld", (LONG)res.err);
+                matrix_fail("hk-benign");
+            } else {
+                pin_check("update-err", (LONG)res.err);
+            }
         }
 
-        op_simple(io0, CMD_CLEAR, &res);
-        if (res.err != 0 && res.err != IOERR_NOCMD) {
-            out_task_printf("devsoak: matrix: FAIL hk-benign: CMD_CLEAR "
-                             "err %ld", (LONG)res.err);
-            matrix_fail_bump();
-        } else {
-            pin_check("clear-err", (LONG)res.err);
+        if (!quirk_cmd_skipped(CMD_CLEAR)) {
+            op_simple(io0, CMD_CLEAR, &res);
+            if (res.err != 0 && res.err != IOERR_NOCMD) {
+                out_task_printf("devsoak: matrix: FAIL hk-benign: CMD_CLEAR "
+                                 "err %ld", (LONG)res.err);
+                matrix_fail("hk-benign");
+            } else {
+                pin_check("clear-err", (LONG)res.err);
+            }
         }
     }
 
     /* 15: etd-stale */
-    if (dialect_enabled(DIALECT_ETD)) {
+    if (dialect_enabled(DIALECT_ETD) && !test_skip_check("etd-stale")) {
         struct Result res;
         ULONG stale = (g_changenum == 0) ? 0xFFFFFFFFUL : g_changenum - 1;
 
@@ -590,14 +726,14 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         if (res.err == 0) {
             out_task_printf("devsoak: matrix: FAIL etd-stale: stale ETD "
                              "count accepted");
-            matrix_fail_bump();
+            matrix_fail("etd-stale");
         } else {
             pin_check("etd-stale-err", (LONG)res.err);
         }
     }
 
     /* 16: nsd-undersized */
-    if (dev.have_nsd) {
+    if (dev.have_nsd && !test_skip_check("nsd-undersized")) {
         UBYTE overrun = 0;
         ULONG i;
 
@@ -621,7 +757,7 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         if (overrun) {
             out_task_printf("devsoak: matrix: FAIL nsd-undersized: overran "
                              "undersized buffer");
-            matrix_fail_bump();
+            matrix_fail("nsd-undersized");
         } else {
             pin_check("nsd-undersized-err",
                       (LONG)(BYTE)io0->iotd_Req.io_Error);
@@ -632,12 +768,13 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
 /* ---- tier 2: 64-bit and probing edges --------------------------------- */
 
 static void
-run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
+run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf,
+          struct timerequest *tio)
 {
     ULONG ss = dev.sector_size;
 
     /* 17: high-word-garbage */
-    {
+    if (!test_skip_check("high-word-garbage")) {
         ULONG di;
 
         for (di = 0; di < g_n_enabled; di++) {
@@ -650,9 +787,11 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 continue;
 
             cmd = (dialect == DIALECT_TD64) ? TD_READ64 : NSCMD_TD_READ64;
+            if (quirk_cmd_skipped(cmd))
+                continue;
             off = cfg.range_start * (U64)ss;
 
-            breadcrumb(cmd, ss, off, buf->data);
+            breadcrumb(tio, cmd, ss, off, buf->data);
             op_build_rw(io0, dialect, 0, off, buf->data, ss, g_changenum);
             io0->iotd_Req.io_Actual = 0xDEADBEEFUL;   /* poison high word */
             op_do_sync(io0, SUBMIT_DOIO, &res);
@@ -661,7 +800,7 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 out_task_printf("devsoak: matrix: FAIL high-word-garbage: "
                                  "%s accepted garbage high word (0x%lx)",
                                  op_cmd_name(cmd), 0xDEADBEEFUL);
-                matrix_fail_bump();
+                matrix_fail("high-word-garbage");
             } else {
                 pin_check(dialect == DIALECT_TD64 ? "td64-hiword-err"
                                                    : "nsd64-hiword-err",
@@ -672,7 +811,8 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
 
     /* 18: hi-word-past-end -- only on a device known to be < 4 GB */
     if (dev.have_geom &&
-        (dev.total_sectors * (U64)ss) < 0x100000000ULL) {
+        (dev.total_sectors * (U64)ss) < 0x100000000ULL &&
+        !test_skip_check("hi-word-past-end")) {
         ULONG di;
 
         for (di = 0; di < g_n_enabled; di++) {
@@ -685,9 +825,11 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 continue;
 
             cmd = (dialect == DIALECT_TD64) ? TD_READ64 : NSCMD_TD_READ64;
+            if (quirk_cmd_skipped(cmd))
+                continue;
             off = 0x100000000ULL + cfg.range_start * (U64)ss;
 
-            breadcrumb(cmd, ss, off, buf->data);
+            breadcrumb(tio, cmd, ss, off, buf->data);
             op_build_rw(io0, dialect, 0, off, buf->data, ss, g_changenum);
             op_do_sync(io0, SUBMIT_DOIO, &res);
 
@@ -695,7 +837,7 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 out_task_printf("devsoak: matrix: FAIL hi-word-past-end: "
                                  "%s accepted a 4GB+ offset on a sub-4GB "
                                  "device", op_cmd_name(cmd));
-                matrix_fail_bump();
+                matrix_fail("hi-word-past-end");
             }
         }
     }
@@ -708,61 +850,72 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
      * on within a single process, so "already known safe" can only ever
      * mean "we are in a -Z run and it worked earlier this run", which
      * cfg.risky already covers). */
-    if (cfg.risky && !stop_skip) {
+    if (cfg.risky && !stop_skip && !test_skip_check("stop-start")) {
         struct Result sres;
 
-        breadcrumb(CMD_STOP, 0, 0, NULL);
-        op_simple(io0, CMD_STOP, &sres);
-
-        if (sres.err == IOERR_NOCMD) {
-            pin_check("stop-err", (LONG)IOERR_NOCMD);
+        if (quirk_cmd_skipped(CMD_STOP)) {
             stop_skip = 1;
-        } else if (sres.err != 0) {
-            out_task_printf("devsoak: matrix: FAIL stop-start: CMD_STOP "
-                             "err %ld", (LONG)sres.err);
-            matrix_fail_bump();
         } else {
-            pin_check("stop-err", 0);
+            breadcrumb(tio, CMD_STOP, 0, 0, NULL);
+            op_simple(io0, CMD_STOP, &sres);
 
-            if (stripes_attempt(0, 1)) {
-                U64  off = cfg.range_start * (U64)ss;
-                UBYTE done_before_start;
-                struct Result rres;
+            if (sres.err == IOERR_NOCMD) {
+                pin_check("stop-err", (LONG)IOERR_NOCMD);
+                stop_skip = 1;
+            } else if (sres.err != 0) {
+                out_task_printf("devsoak: matrix: FAIL stop-start: CMD_STOP "
+                                 "err %ld", (LONG)sres.err);
+                matrix_fail("stop-start");
+            } else {
+                pin_check("stop-err", 0);
 
-                op_build_rw(io1, DIALECT_CMD, 0, off, buf->data, ss,
-                            g_changenum);
-                SendIO((struct IORequest *)io1);
-                done_before_start = (CheckIO((struct IORequest *)io1) != NULL);
-                pin_check("stop-gates", done_before_start ? 0 : 1);
+                if (stripes_attempt(0, 1)) {
+                    U64  off = cfg.range_start * (U64)ss;
+                    UBYTE done_before_start;
+                    struct Result rres;
 
-                breadcrumb(CMD_START, 0, 0, NULL);
-                op_simple(io0, CMD_START, &sres);
-                if (sres.err != 0) {
-                    out_task_printf("devsoak: matrix: FAIL stop-start: "
-                                     "CMD_START err %ld", (LONG)sres.err);
-                    matrix_fail_bump();
+                    op_build_rw(io1, DIALECT_CMD, 0, off, buf->data, ss,
+                                g_changenum);
+                    SendIO((struct IORequest *)io1);
+                    done_before_start =
+                        (CheckIO((struct IORequest *)io1) != NULL);
+                    pin_check("stop-gates", done_before_start ? 0 : 1);
+
+                    if (!quirk_cmd_skipped(CMD_START)) {
+                        breadcrumb(tio, CMD_START, 0, 0, NULL);
+                        op_simple(io0, CMD_START, &sres);
+                        if (sres.err != 0) {
+                            out_task_printf("devsoak: matrix: FAIL "
+                                            "stop-start: CMD_START err %ld",
+                                            (LONG)sres.err);
+                            matrix_fail("stop-start");
+                        }
+                    }
+
+                    WaitIO((struct IORequest *)io1);
+                    rres.err = (LONG)(BYTE)io1->iotd_Req.io_Error;
+                    rres.actual = io1->iotd_Req.io_Actual;
+                    if (rres.err != 0) {
+                        out_task_printf("devsoak: matrix: FAIL stop-start: "
+                                        "read after CMD_START err %ld",
+                                        (LONG)rres.err);
+                        matrix_fail("stop-start");
+                    }
+
+                    stripes_release(0, 1);
                 }
-
-                WaitIO((struct IORequest *)io1);
-                rres.err = (LONG)(BYTE)io1->iotd_Req.io_Error;
-                rres.actual = io1->iotd_Req.io_Actual;
-                if (rres.err != 0) {
-                    out_task_printf("devsoak: matrix: FAIL stop-start: read "
-                                     "after CMD_START err %ld",
-                                     (LONG)rres.err);
-                    matrix_fail_bump();
-                }
-
-                stripes_release(0, 1);
             }
         }
     }
 
     /* 20: motor */
-    if (!motor_skip) {
+    if (!motor_skip && !test_skip_check("motor")) {
+      if (quirk_cmd_skipped(TD_MOTOR)) {
+        motor_skip = 1;
+      } else {
         LONG errcode;
 
-        breadcrumb(TD_MOTOR, 0, 0, NULL);
+        breadcrumb(tio, TD_MOTOR, 0, 0, NULL);
         io0->iotd_Req.io_Command = TD_MOTOR;
         io0->iotd_Req.io_Data = NULL;
         io0->iotd_Req.io_Length = 1;      /* motor on */
@@ -780,7 +933,7 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         } else if (errcode != 0) {
             out_task_printf("devsoak: matrix: FAIL motor: TD_MOTOR(on) "
                              "err %ld", (LONG)errcode);
-            matrix_fail_bump();
+            matrix_fail("motor");
         } else {
             ULONG prevstate = io0->iotd_Req.io_Actual;
 
@@ -793,7 +946,7 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                 out_task_printf("devsoak: matrix: FAIL motor: TD_MOTOR(off) "
                                  "err %ld",
                                  (LONG)(BYTE)io0->iotd_Req.io_Error);
-                matrix_fail_bump();
+                matrix_fail("motor");
             } else {
                 /* The brief expects io_Actual = previous motor state (1
                  * here, we just turned it on), but scsi.device 47.4 stubs
@@ -810,13 +963,14 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
             io0->iotd_Req.io_Error = (BYTE)0xa5;
             DoIO((struct IORequest *)io0);
         }
+      }
     }
 }
 
 /* ---- tier 3: risky (-Z only) ------------------------------------------ */
 
 static void
-run_tier3(struct IOExtTD *io0, struct TestBuf *buf)
+run_tier3(struct IOExtTD *io0, struct TestBuf *buf, struct timerequest *tio)
 {
     ULONG ss = dev.sector_size;
     static ULONG rng;
@@ -829,7 +983,7 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf)
      * every issue instead -- the whole point of §16.4 is "what was in
      * flight when it died", and for a command chosen at random that is
      * every issue, not just the first. */
-    {
+    if (!quirk_norandomcmd() && !test_skip_check("random-cmd")) {
         UWORD cmd;
         struct Result res;
         char offbuf[24];
@@ -846,13 +1000,13 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf)
         if (res.err == 0) {
             out_task_printf("devsoak: matrix: FAIL random-cmd: cmd 0x%lx "
                              "succeeded (expected IOERR_NOCMD)", (ULONG)cmd);
-            matrix_fail_bump();
+            matrix_fail("random-cmd");
         }
         /* any nonzero err is tolerated -- no pin, too many possible codes */
     }
 
     /* 22: unlisted-64 */
-    {
+    if (!test_skip_check("unlisted-64")) {
         static const ULONG all64[3] = {
             DIALECT_TD64, DIALECT_NSD64, DIALECT_NSDETD64
         };
@@ -870,9 +1024,11 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf)
             cmd = (dialect == DIALECT_TD64) ? TD_READ64
                 : (dialect == DIALECT_NSD64) ? NSCMD_TD_READ64
                                               : NSCMD_ETD_READ64;
+            if (quirk_cmd_skipped(cmd))
+                continue;
             off = cfg.range_start * (U64)ss;
 
-            breadcrumb(cmd, ss, off, buf->data);
+            breadcrumb(tio, cmd, ss, off, buf->data);
             op_build_rw(io0, dialect, 0, off, buf->data, ss, g_changenum);
             op_do_sync(io0, SUBMIT_DOIO, &res);
 
@@ -891,7 +1047,7 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf)
      * sized (lide.device 40.12 rejects a single-sector format with
      * IOERR_BADADDRESS, correctly) -- format exactly one track, at the
      * first track boundary inside the range. */
-    {
+    if (!test_skip_check("format")) {
         ULONG tsects = (dev.have_geom && dev.geom.dg_TrackSectors != 0)
                        ? dev.geom.dg_TrackSectors : 1;
         ULONG tsize = tsects * ss;
@@ -922,8 +1078,10 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf)
             }
             if (d > 0 && !dialect_enabled(dialect))
                 continue;
+            if (quirk_cmd_skipped(cmd))
+                continue;
 
-            breadcrumb(cmd, tsize, off, buf->data);
+            breadcrumb(tio, cmd, tsize, off, buf->data);
             if (stripes_attempt(idx0, tsects)) {
                 struct Result res;
                 ULONG k;
@@ -955,7 +1113,7 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf)
                                      "silent partial, err 0 actual %ld "
                                      "of %ld", op_cmd_name(cmd),
                                      (LONG)res.actual, (LONG)tsize);
-                    matrix_fail_bump();
+                    matrix_fail("format");
                 } else {
                     /* any error code is a pinned behaviour: lide.device
                      * 40.12 rejects a valid plain TD_FORMAT with
@@ -977,26 +1135,32 @@ run_lifecycle(struct IOExtTD *scratch)
     LONG err;
 
     /* 24: open-bad-unit */
-    err = OpenDevice((CONST_STRPTR)cfg.device, 999, (struct IORequest *)scratch, 0);
-    if (err == 0) {
-        out_task_printf("devsoak: matrix: FAIL open-bad-unit: "
-                         "OpenDevice(unit 999) succeeded");
-        matrix_fail_bump();
-        CloseDevice((struct IORequest *)scratch);
-    } else {
-        pin_check("bad-unit-err", (LONG)scratch->iotd_Req.io_Error);
+    if (!test_skip_check("open-bad-unit")) {
+        err = OpenDevice((CONST_STRPTR)cfg.device, 999,
+                         (struct IORequest *)scratch, 0);
+        if (err == 0) {
+            out_task_printf("devsoak: matrix: FAIL open-bad-unit: "
+                             "OpenDevice(unit 999) succeeded");
+            matrix_fail("open-bad-unit");
+            CloseDevice((struct IORequest *)scratch);
+        } else {
+            pin_check("bad-unit-err", (LONG)scratch->iotd_Req.io_Error);
+        }
     }
 
     /* 25: extra-open */
-    err = OpenDevice((CONST_STRPTR)cfg.device, cfg.unit,
-                     (struct IORequest *)scratch, 0);
-    if (err != 0) {
-        out_task_printf("devsoak: matrix: FAIL extra-open: "
-                         "OpenDevice(unit %ld) failed, err %ld",
-                         (LONG)cfg.unit, (LONG)scratch->iotd_Req.io_Error);
-        matrix_fail_bump();
-    } else {
-        CloseDevice((struct IORequest *)scratch);
+    if (!test_skip_check("extra-open")) {
+        err = OpenDevice((CONST_STRPTR)cfg.device, cfg.unit,
+                         (struct IORequest *)scratch, 0);
+        if (err != 0) {
+            out_task_printf("devsoak: matrix: FAIL extra-open: "
+                             "OpenDevice(unit %ld) failed, err %ld",
+                             (LONG)cfg.unit,
+                             (LONG)scratch->iotd_Req.io_Error);
+            matrix_fail("extra-open");
+        } else {
+            CloseDevice((struct IORequest *)scratch);
+        }
     }
 }
 
@@ -1126,14 +1290,20 @@ inv_entry(void)
     Signal(hs_main_task, 1UL << hs_signum);
 
     while (!inv_stop) {
+        LONG qt = quirk_tier();     /* -1 = no override */
+
         run_tier0(io0, io1, &buf);
         if (inv_stop) break;
-        run_tier1(io0, io1, &buf);
-        if (inv_stop) break;
-        run_tier2(io0, io1, &buf);
-        if (inv_stop) break;
-        if (cfg.risky)
-            run_tier3(io0, &buf);
+        if (qt < 0 || qt >= 1) {
+            run_tier1(io0, io1, &buf);
+            if (inv_stop) break;
+        }
+        if (qt < 0 || qt >= 2) {
+            run_tier2(io0, io1, &buf, tio);
+            if (inv_stop) break;
+        }
+        if (cfg.risky && (qt < 0 || qt >= 3))
+            run_tier3(io0, &buf, tio);
 
         if (inv_passes == 0 || elapsed_since_lifecycle >= 1800) {
             run_lifecycle(scratch);
@@ -1186,9 +1356,11 @@ invariant_start(void)
     inv_stop = 0;
     inv_done = 0;
     inv_errors = 0;
+    inv_warnings = 0;
     inv_passes = 0;
     n_pins = 0;
     n_bc = 0;
+    n_skiprep = 0;
     stop_skip = 0;
     motor_skip = 0;
 
@@ -1242,6 +1414,12 @@ ULONG
 invariant_errors(void)
 {
     return inv_errors;
+}
+
+ULONG
+invariant_warnings(void)
+{
+    return inv_warnings;
 }
 
 ULONG
