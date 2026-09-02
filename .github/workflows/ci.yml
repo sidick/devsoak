@@ -13,7 +13,8 @@ name: CI
 #                the LIDE board and run devsoak's 30-second smoke profile
 #                against lide.device; ci/smoke.sh maps the guest's
 #                "devsoak: RESULT" verdict line to the job's exit code.
-#                Copperline comes from Flathub (dev.copperline.Copperline).
+#                Copperline comes from its GitHub release AppImage,
+#                pinned below and extracted (no FUSE on runners).
 
 on:
   push:
@@ -65,24 +66,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: devsoak
-      - name: Install Copperline (Flathub) and xdftool
+      - name: Install Copperline (release AppImage) and xdftool
+        env:
+          COPPERLINE_VERSION: "0.18.0"
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q flatpak
-          sudo flatpak remote-add --if-not-exists flathub \
-            https://dl.flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y --noninteractive flathub \
-            dev.copperline.Copperline
+          curl -fsSL -o copperline.AppImage \
+            "https://github.com/CopperlineHQ/Copperline/releases/download/v${COPPERLINE_VERSION}/Copperline-${COPPERLINE_VERSION}-x86_64.AppImage"
+          chmod +x copperline.AppImage
+          # extract instead of running: AppImage mounting needs FUSE,
+          # which GitHub runners don't provide
+          ./copperline.AppImage --appimage-extract >/dev/null
+          sudo mv squashfs-root /opt/copperline
           pip install --user amitools
-          # smoke.sh drives the emulator via $COPPERLINE; hand it a shim
-          # that forwards through flatpak with host filesystem access
-          # (the config/victim/devsoak live in a mktemp workdir).
-          printf '#!/bin/sh\nexec flatpak run --filesystem=host dev.copperline.Copperline "$@"\n' \
-            | sudo tee /usr/local/bin/copperline-flatpak >/dev/null
-          sudo chmod +x /usr/local/bin/copperline-flatpak
       - name: Smoke run
         run: |
           export PATH="$HOME/.local/bin:$PATH"   # pip --user (xdftool)
           chmod +x devsoak ci/smoke.sh
-          COPPERLINE=/usr/local/bin/copperline-flatpak \
+          COPPERLINE=/opt/copperline/AppRun \
             ci/smoke.sh test/aros-lide.toml lide.device 0 512,2K
