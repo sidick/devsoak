@@ -1,0 +1,88 @@
+name: CI
+
+# Three gates on every push/PR:
+#   build      - cross-compile with bebbo amiga-gcc (docker), fail on any
+#                compiler warning, and enforce the no-utility.library link
+#                check (the Kickstart 1.3 regression guard: the default
+#                libnix wires even 32-bit mul/div through utility.library,
+#                which does not exist on 1.3 -- see src/soft64.c).
+#   docs-build - strict MkDocs build of the user-docs site, so a broken
+#                page or dead link cannot reach a release publish.
+#   smoke      - boot Copperline's bundled AROS ROM (no Kickstart image,
+#                so no licensed ROM in CI) with a scratch victim HDF on
+#                the LIDE board and run devsoak's 30-second smoke profile
+#                against lide.device; ci/smoke.sh maps the guest's
+#                "devsoak: RESULT" verdict line to the job's exit code.
+#                Copperline comes from Flathub (dev.copperline.Copperline).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: amiga-gcc build + link hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (fails on any warning)
+        run: |
+          make 2>&1 | tee build.log
+          test -f devsoak
+          ! grep -E 'warning|error' build.log
+      - name: No utility.library reference (KS1.3 guard)
+        run: |
+          docker run --rm -v "$PWD":/work -w /work \
+            stefanreinauer/amiga-gcc:gcc-v16.1 \
+            sh -c 'm68k-amigaos-nm devsoak | grep -i utility; exit 0' \
+            | tee nm-utility.log
+          ! test -s nm-utility.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devsoak
+          path: devsoak
+
+  docs-build:
+    name: Docs site (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install docs toolchain
+        run: pip install -r tools/docs-requirements.txt
+      - name: Strict MkDocs build
+        run: mkdocs build --strict
+
+  smoke:
+    name: AROS-boot smoke (lide.device)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: devsoak
+      - name: Install Copperline (Flathub) and xdftool
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flatpak
+          sudo flatpak remote-add --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y --noninteractive flathub \
+            dev.copperline.Copperline
+          pip install --user amitools
+          # smoke.sh drives the emulator via $COPPERLINE; hand it a shim
+          # that forwards through flatpak with host filesystem access
+          # (the config/victim/devsoak live in a mktemp workdir).
+          printf '#!/bin/sh\nexec flatpak run --filesystem=host dev.copperline.Copperline "$@"\n' \
+            | sudo tee /usr/local/bin/copperline-flatpak >/dev/null
+          sudo chmod +x /usr/local/bin/copperline-flatpak
+      - name: Smoke run
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"   # pip --user (xdftool)
+          chmod +x devsoak ci/smoke.sh
+          COPPERLINE=/usr/local/bin/copperline-flatpak \
+            ci/smoke.sh test/aros-lide.toml lide.device 0 512,2K

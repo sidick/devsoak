@@ -21,6 +21,7 @@ set -u
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 CONFIG=${1:-"$REPO/test/a1200-scsi.toml"}
+case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 DEVICE=${2:-scsi.device}
 UNIT=${3:-0}
 RANGE=${4:-512,2K}
@@ -38,7 +39,7 @@ cp "$REPO/devsoak" "$REPO/devsoak.quirks" "$WORK/"
     >/dev/null || { echo "smoke: xdftool failed"; exit 20; }
 
 echo "smoke: $DEVICE unit $UNIT range $RANGE via $CONFIG"
-( cd "$WORK" && timeout 900 copperline --config "$CONFIG" --factory \
+( cd "$WORK" && timeout 900 "${COPPERLINE:-copperline}" --config "$CONFIG" --factory \
     --run ./devsoak \
     --run-args "$DEVICE $UNIT -d -r $RANGE -t 30s -w 2 -q 2 -A 0 -W 30 -y -o ser $*" \
     --noaudio --screenshot-after 200 smoke.png ) > "$LOG" 2>"$WORK/emu.err"

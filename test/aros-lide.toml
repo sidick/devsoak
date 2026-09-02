@@ -1,0 +1,20 @@
+# CI-safe smoke config: Copperline's bundled AROS boot ROM (no Kickstart
+# image needed, so this runs on any machine including cloud CI), victim
+# HDF on the LIDE (RIPPLE) board -> lide.device unit 0, serial to host
+# stdout. devsoak runs on AROS m68k by design (brief §3).
+#
+# Victim: xdftool victim.hdf create size=2Mi + format Victim ffs
+# (ci/smoke.sh creates it fresh per run.)
+
+[machine]
+profile = "A1200"
+
+[memory]
+fast = "8M"
+
+[lide]
+board = "ripple"
+drive0 = { path = "victim.hdf", bootpri = -128 }
+
+[serial]
+mode = "stdout"
