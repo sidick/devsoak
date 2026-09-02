@@ -6,15 +6,15 @@
 # PATH and the direct build rule applies.
 
 CC       := m68k-amigaos-gcc
-CFLAGS   := -noixemul -m68000 -Os -Wall -Wextra -Wno-unused-parameter
-LDFLAGS  := -noixemul -m68000
+CFLAGS   := -mcrt=nix13 -m68000 -Os -Wall -Wextra -Wno-unused-parameter
+LDFLAGS  := -mcrt=nix13 -m68000
 LDLIBS   := -lamiga
 
 SRCDIR   := src
 OBJDIR   := obj
 SOURCES  := main.c args.c output.c timer.c content.c ring.c ops.c buf.c \
             engine.c stripe.c stats.c worker.c audit.c invariant.c quirks.c \
-            scsicmd.c removable.c
+            scsicmd.c removable.c soft64.c
 OBJECTS  := $(SOURCES:%.c=$(OBJDIR)/%.o)
 TARGET   := devsoak
 

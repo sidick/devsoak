@@ -372,15 +372,22 @@ run_tier0(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         U64 off = (dev.total_sectors - 1) * (U64)ss;
         struct Result res;
 
-        op_build_rw(io0, DIALECT_CMD, 0, off, buf->data, ss, g_changenum);
-        op_do_sync(io0, SUBMIT_DOIO, &res);
-        if (res.err != 0 || res.actual != ss) {
-            out_task_printf("devsoak: matrix: FAIL read-last-sector: cmd %s "
-                             "off_lo %ld len %ld err %ld actual %ld",
-                             op_cmd_name(io0->iotd_Req.io_Command),
-                             (LONG)(off & 0xFFFFFFFFUL), (LONG)ss,
-                             (LONG)res.err, (LONG)res.actual);
-            matrix_fail("read-last-sector");
+        /* >4GB offsets need a 64-bit dialect (op_build_rw upgrades
+         * automatically); if the driver has none, a truncated 32-bit
+         * read would be a false failure -- skip. (Thanks LIV2.) */
+        if (op_dialect_for(off, ss) != DIALECT_COUNT) {
+            op_build_rw(io0, DIALECT_CMD, 0, off, buf->data, ss,
+                        g_changenum);
+            op_do_sync(io0, SUBMIT_DOIO, &res);
+            if (res.err != 0 || res.actual != ss) {
+                out_task_printf("devsoak: matrix: FAIL read-last-sector: "
+                                 "cmd %s off_lo %ld len %ld err %ld "
+                                 "actual %ld",
+                                 op_cmd_name(io0->iotd_Req.io_Command),
+                                 (LONG)(off & 0xFFFFFFFFUL), (LONG)ss,
+                                 (LONG)res.err, (LONG)res.actual);
+                matrix_fail("read-last-sector");
+            }
         }
     }
 
@@ -516,15 +523,20 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         U64 off = dev.total_sectors * (U64)ss;
         struct Result res;
 
-        op_build_rw(io0, DIALECT_CMD, 0, off, buf->data, ss, g_changenum);
-        op_do_sync(io0, SUBMIT_DOIO, &res);
-        if (res.err == 0) {
-            out_task_printf("devsoak: matrix: FAIL read-past-end: silently "
-                             "succeeded, off_lo %ld",
-                             (LONG)(off & 0xFFFFFFFFUL));
-            matrix_fail("read-past-end");
-        } else {
-            pin_check("past-end-err", (LONG)res.err);
+        /* >4GB device end with no 64-bit dialect: a truncated 32-bit
+         * probe would be a false failure -- skip. (Thanks LIV2.) */
+        if (op_dialect_for(off, ss) != DIALECT_COUNT) {
+            op_build_rw(io0, DIALECT_CMD, 0, off, buf->data, ss,
+                        g_changenum);
+            op_do_sync(io0, SUBMIT_DOIO, &res);
+            if (res.err == 0) {
+                out_task_printf("devsoak: matrix: FAIL read-past-end: "
+                                 "silently succeeded, off_lo %ld",
+                                 (LONG)(off & 0xFFFFFFFFUL));
+                matrix_fail("read-past-end");
+            } else {
+                pin_check("past-end-err", (LONG)res.err);
+            }
         }
     }
 
@@ -536,17 +548,22 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
         ULONG len = 4 * ss;
         struct Result res;
 
-        op_build_rw(io0, DIALECT_CMD, 0, off, buf->data, len, g_changenum);
-        op_do_sync(io0, SUBMIT_DOIO, &res);
-        if (res.err == 0) {
-            out_task_printf("devsoak: matrix: FAIL straddle-end: silently "
-                             "succeeded");
-            matrix_fail("straddle-end");
-        } else if (res.actual > 2 * ss) {
-            out_task_printf("devsoak: matrix: FAIL straddle-end: io_Actual "
-                             "not clamped, actual %ld expected <= %ld",
-                             (LONG)res.actual, (LONG)(2 * ss));
-            matrix_fail("straddle-end");
+        /* same >4GB/no-64-bit skip as test 8 */
+        if (op_dialect_for(off, len) != DIALECT_COUNT) {
+            op_build_rw(io0, DIALECT_CMD, 0, off, buf->data, len,
+                        g_changenum);
+            op_do_sync(io0, SUBMIT_DOIO, &res);
+            if (res.err == 0) {
+                out_task_printf("devsoak: matrix: FAIL straddle-end: "
+                                 "silently succeeded");
+                matrix_fail("straddle-end");
+            } else if (res.actual > 2 * ss) {
+                out_task_printf("devsoak: matrix: FAIL straddle-end: "
+                                 "io_Actual not clamped, actual %ld "
+                                 "expected <= %ld",
+                                 (LONG)res.actual, (LONG)(2 * ss));
+                matrix_fail("straddle-end");
+            }
         }
     }
 

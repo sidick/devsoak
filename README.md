@@ -32,6 +32,14 @@ directly; otherwise `make` runs the build inside the
 `stefanreinauer/amiga-gcc:gcc-v16.1` docker image. The result is a single
 static `devsoak` binary.
 
+The build uses `-mcrt=nix13`, not plain `-noixemul`: the default libnix
+variant implements even 32-bit multiply/divide via utility.library
+(V36+), which makes the binary refuse to start on Kickstart 1.3
+("utility.library failed to load"). `src/soft64.c` additionally provides
+pure-software 64-bit helpers so no U64 arithmetic can reintroduce the
+dependency. If you change the toolchain flags, re-check with
+`m68k-amigaos-nm devsoak | grep -i utility` — it must print nothing.
+
 ## Usage
 
 ```
@@ -155,16 +163,32 @@ it **pins** the first observed behaviour and fails only if the behaviour
 *changes* during the run. Pinned values are printed live and summarised at
 the end. Observed so far:
 
-| behaviour | scsi.device 47.4 | lide.device 40.12 |
-|---|---|---|
-| zero-length I/O | success, io_Actual 0 | IOERR_BADLENGTH |
-| non-sector-multiple length (read) | IOERR_BADLENGTH | serviced |
-| unaligned io_Offset (read) | serviced | serviced |
-| TD_MOTOR io_Actual | always 0 (no prev state) | always 0 |
-| ETD_ dialect | IOERR_NOCMD | works |
-| plain TD_FORMAT (whole track) | works | IOERR_BADADDRESS* |
-| bad-unit OpenDevice error | 50 | TDERR_BadUnitNum (32) |
-| IOF_QUICK | never honoured | never honoured |
+| behaviour | scsi.device 47.4 | lide.device 40.12 | trackdisk.device 47.14 |
+|---|---|---|---|
+| zero-length read | success, actual 0 | IOERR_BADLENGTH | success, reads a whole sector (actual 512)! |
+| non-sector-multiple length (read) | IOERR_BADLENGTH | serviced | — |
+| unaligned io_Offset (read) | serviced | serviced | — |
+| TD_MOTOR io_Actual | always 0 (no prev state) | always 0 | previous state |
+| ETD_ dialect | IOERR_NOCMD | works | works (native) |
+| TD_RAWREAD/RAWWRITE | IOERR_NOCMD | IOERR_NOCMD | native |
+| plain TD_FORMAT (whole track) | works | IOERR_BADADDRESS* | works |
+| bad-unit OpenDevice error | 50 | TDERR_BadUnitNum (32) | TDERR_BadUnitNum |
+| IOF_QUICK | never honoured | never honoured | never honoured |
+
+Zero-length probes therefore hard-fail only when bytes beyond the claimed
+io_Actual are touched. Bounds probes at the device end auto-select a
+64-bit dialect when the offset needs one (a 32-bit probe at a >4 GB
+offset would truncate and false-fail — thanks to LIV2 for flagging the
+same hazard independently), and skip when the driver has no 64-bit
+dialect at all.
+
+Driver-caching notes learned the hard way: trackdisk.device serves
+repeat reads of the same track from its RAM track buffer without
+touching the hardware (so an ejected disk keeps "reading" — the -R
+poll alternates tracks to defeat this), and TD_REMCHANGEINT must be
+issued on the same still-pending IORequest that carried
+TD_ADDCHANGEINT, per the V47 autodoc — any other request wedges the
+driver.
 
 \* lide.device 40.12 reads stale `io_Actual` as an offset high word for
 TD_FORMAT, and advertises ETD_FORMAT without dispatching it — both
@@ -257,6 +281,19 @@ Copperline Control Protocol). Each expects a scratch `victim.hdf`
 `blank.adf` next to the binary. Note that Copperline's synthesized RDB
 occupies the first cylinder of a bare hardfile, so place `-r` past it
 (e.g. `-r 512,2K` on the 2 MB victim).
+
+`ci/smoke.sh` is the CI entry point: it builds a fresh scratch victim,
+boots the named config, runs the 30-second profile and maps devsoak's
+final `RESULT` line to its exit code (PASS 0 / WARN 5 / FAIL 10 / no
+verdict at all 20 — the last meaning the guest crashed or hung, with
+the §16.4 breadcrumb naming the suspect at the end of the serial log).
+
+For Kickstart 1.3 there is no `--run` staging (it needs 2.0+ shell
+built-ins): build a minimal bootable OFS floppy instead — devsoak, the
+quirks file, and a one-line `s/startup-sequence` invoking it — e.g.
+`xdftool boot.adf create + format Boot ofs + boot install + write
+devsoak + write devsoak.quirks + makedir s + write ss.txt
+s/startup-sequence`.
 
 After devsoak is clean, layer real clients on top: mount FFS/PFS3/SFS
 partitions on the driver and run filesystem-level stress (e.g.

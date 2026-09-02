@@ -1138,9 +1138,10 @@ void crumb_write(const char *line)
 {
     if (crumb_fh == 0)
         return;
+    /* unbuffered DOS handle: each Write() IS the flush (Flush() itself
+     * is V36+ and does not exist on Kickstart 1.3) */
     Write(crumb_fh, (APTR)line, (LONG)strlen(line));
     Write(crumb_fh, (APTR)"\n", 1);
-    Flush(crumb_fh);
 }
 
 void crumb_close(void)
