@@ -1,9 +1,9 @@
-Short:        Destructive soak/correctness tester for trackdisk drivers
+Short:        Destructive trackdisk driver soak tester
 Author:       simond@irrelevant.org (Simon Dick)
 Uploader:     simond@irrelevant.org (Simon Dick)
 Type:         dev/misc
 Version:      1.0
-Architecture: m68k-amigaos >= 3.0; m68k-aros
+Architecture: m68k-amigaos >= 3.0
 Requires:     68000
 
 *** WARNING: THIS IS A DESTRUCTIVE TESTING TOOL ***
