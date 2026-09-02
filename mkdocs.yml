@@ -1,0 +1,49 @@
+# User documentation site (MkDocs Material), published per release via mike
+# to GitHub Pages — see .github/workflows/docs.yml. Developer material
+# (test configs, fingerprints, acceptance logs) stays in the repo and is
+# not part of this site.
+
+site_name: devsoak
+site_description: A destructive correctness and soak tester for trackdisk-style AmigaOS block device drivers
+site_url: https://sidick.github.io/devsoak/
+repo_url: https://github.com/sidick/devsoak
+repo_name: sidick/devsoak
+edit_uri: edit/main/userdocs/
+copyright: devsoak — a block device driver soak tester for classic AmigaOS.
+
+docs_dir: userdocs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.footer
+    - content.action.edit
+
+extra:
+  version:
+    provider: mike
+
+markdown_extensions:
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Installation: Installation.md
+  - CLI Reference: CLI-Reference.md
+  - Understanding a Run: Understanding-Runs.md
+  - The Quirks File: Quirks.md
+  - Fingerprinting Drivers: Fingerprinting.md
+  - Testing under Emulation: Emulator-Testing.md
