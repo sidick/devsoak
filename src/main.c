@@ -4,6 +4,7 @@
  */
 
 #include "devsoak.h"
+#include "version.h"
 
 #include <proto/exec.h>
 #include <proto/dos.h>
@@ -15,8 +16,7 @@
 struct Config       cfg;
 struct DevUnderTest dev;
 
-static const char verstag[] __attribute__((used)) =
-    "$VER: devsoak 0.1 (01.09.2026)";
+DEVSOAK_VERSTAG
 
 /* args.c, deliberately not declared in devsoak.h (internal to this program) */
 extern LONG args_parse(int argc, char **argv);

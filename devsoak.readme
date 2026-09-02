@@ -1,0 +1,59 @@
+Short:        Destructive soak/correctness tester for trackdisk drivers
+Author:       simond@irrelevant.org (Simon Dick)
+Uploader:     simond@irrelevant.org (Simon Dick)
+Type:         dev/misc
+Version:      0.1
+Architecture: m68k-amigaos >= 3.0; m68k-aros
+Requires:     68000
+
+devsoak is a destructive correctness and soak tester for trackdisk-style
+AmigaOS block device drivers. One run answers two questions: does every
+command the driver accepts do the right thing - including the edge cases
+(bounds, alignment, zero length, the 64-bit offset high word, stale ETD
+change counts, unsupported commands) - and does it keep doing the right
+thing for hours while several tasks issue overlapping reads, writes and
+housekeeping commands with multiple requests in flight.
+
+devsoak works a fixed sector range so it can hold per-sector state and
+prove *content* correctness under sustained concurrent load, not just
+whether a driver accepts a command. It complements devtest
+(https://github.com/cdhooper/amiga_devtest), which probes acceptance and
+sweeps whole devices.
+
+This release ships:
+
+  devsoak         - the tester, a single static binary
+  devsoak.quirks  - the seed quirks file (known driver-specific behaviour
+                     to skip, expect, or pin rather than treat as a bug -
+                     see README.md's Quirks section); devsoak looks for
+                     this file beside its own binary
+
+devsoak is destructive: it will overwrite the sector range you point it
+at. Never run it against a range holding data you want to keep.
+
+Requirements
+------------
+  - AmigaOS 3.0+ (KS 1.3 is also supported at reduced dialect coverage)
+    or AROS m68k, 68000 or better.
+  - A block device to test, and a sector range on it you do not need.
+
+Quick start
+-----------
+  devsoak scsi.device 0 -d -r 0,8M -t 30s -y
+  devsoak lide.device 0 -d -r 0,64M -w 4 -q 4 -t 8h -A 15 -y
+
+See https://sidick.github.io/devsoak/ for the full CLI reference, the
+quirks-file format, and the fingerprinting workflow.
+
+AI disclosure
+-------------
+  devsoak is written largely by an AI coding agent (Anthropic's Claude /
+  Claude Code), under human direction, review and emulator/on-hardware
+  testing. Full source is open (BSD 2-Clause) for review.
+
+Documentation, source and licence
+---------------------------------
+  Free and open source, BSD 2-Clause. Full documentation (versioned per
+  release), source and issue tracker:
+      https://sidick.github.io/devsoak/
+      https://github.com/sidick/devsoak
