@@ -119,6 +119,102 @@ A 1 MB machine runs `-w 2 -q 2 -r ...,8M -M 0x8000`. Placing the range at
 the end of the device puts the traffic and the bounds tests in the same
 neighbourhood.
 
+## Worked examples
+
+All examples assume a scratch range — devsoak destroys it. Sector 0 of a
+partitioned disk holds the RDB; put `-r` somewhere expendable.
+
+**Characterise an unknown driver in a minute** — the quickest way to
+learn what a driver actually does (which dialects it speaks, how it
+answers the edge cases) is a short run in driver-under-test mode and a
+read of the pin lines:
+
+    devsoak lide.device 0 -d -r 512,2K -t 60s -K -y
+
+The `matrix: pinned ...` lines are the driver's behavioural fingerprint
+(zero-length handling, unaligned offsets, error codes for past-end and
+bad units, IOF_QUICK, motor semantics...). Two drivers can both be
+"correct" and pin differently — that is what the quirks file records.
+Add `-Z` to also fingerprint the risky tier (FORMAT variants, random
+command numbers, unadvertised 64-bit dialects).
+
+**CI gate on every driver commit** — 30 seconds, exit code tells the
+build:
+
+    ci/smoke.sh test/a1200-scsi.toml scsi.device 0 512,2K
+
+**Overnight soak** — the actual endurance question. Size the watchdog
+for the queue depth (see above) and let the auditor sweep periodically:
+
+    devsoak copperhf.device 0 -d -r 512,120K -t 8h -w 4 -q 6 -A 15 -W 60 -X -y
+
+**Reproduce and bisect a failure** — a soak failure prints the run's
+seed. Replay the identical op sequence with one request in flight:
+
+    devsoak copperhf.device 0 -d -r 512,120K -w 1 -q 1 -s 1535717554 -y
+
+`-w 1 -q 1` is strictly sequential and deterministic from the seed, so
+the op ring of two runs matches byte for byte — then shrink `-t`/`-r`
+until the failure is minutes away instead of hours.
+
+**Compare against a known-good driver** — run the same profile on the
+reference (quirks applied, so its known oddities don't count as
+findings) and on the driver under test (`-K`), then diff the pin
+summaries:
+
+    devsoak scsi.device 0 -d -r 512,2K -t 60s -y
+    devsoak copperhf.device 0 -d -r 512,2K -t 60s -K -y
+
+**Hunt a crash in a fragile driver** — tiered ordering plus breadcrumbs
+means a lockup names its own culprit:
+
+    devsoak old.device 0 -d -r 2K,8K -t 5m -K -Z -P RAM:crumbs -o both -y
+
+Every tier-2/3 command is announced on serial and appended to the -P
+file *before* its first issue. After the reboot:
+
+    devsoak old.device 0 -P RAM:crumbs --resume
+
+prints the last breadcrumb and a ready-to-paste `status suspected`
+quirks entry for the command that was in flight. (Put the -P file
+somewhere that survives — a different device than the one under test,
+or an emulator-mounted host directory.)
+
+**Big device / 4 GB boundary** — place the range across the boundary
+(sector 8388608 at 512-byte sectors) so straddling transfers are real
+writes:
+
+    devsoak lide.device 0 -d -r 8388096,1K -t 60s -B -y
+
+Catches ignored offset high words (the classic ">4 GB wraps to a low
+LBA" corruption) via both the boundary tests and the content model:
+a wrapped write lands with the wrong LBA in its sector header.
+
+**Removable media semantics** — needs a genuinely removable unit
+(floppy, or a hot-pluggable emulated unit) and someone or something to
+swap the disk; `-H` runs a guest command at each transition instead of
+prompting:
+
+    devsoak trackdisk.device 0 -d -r 0,220 -t 10s -R -W 60 -y
+
+Under Copperline, drive the prompts from the host over the control
+protocol (`copperline-ctl media.floppy.eject/insert`) — see
+`test/a1200-floppy.toml` for the wiring, including the TCP serial sink
+that makes the prompts visible to a host script in real time.
+
+**SCSI passthrough sanity** — for drivers with HD_SCSICMD:
+
+    devsoak scsi.device 0 -d -r 512,2K -t 30s -X -y
+
+Cross-checks READ CAPACITY(10) against TD_GETGEOMETRY, byte-compares
+READ(10) with CMD_READ, and verifies autosense on an illegal opcode.
+
+**Kickstart 1.3 machine** — no shell built-ins, no `--run` staging:
+boot from a minimal floppy (see "Test configurations" below) and keep
+the resource footprint small:
+
+    devsoak lide.device 0 -d -r 512,2K -t 30s -w 2 -q 2 -W 60 -y -o ser
+
 ## What a run does
 
 1. **Fill**: writes generation 1 over the whole range. Every sector devsoak
