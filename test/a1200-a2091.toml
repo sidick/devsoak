@@ -1,0 +1,29 @@
+# devsoak fingerprint config: A1200 + KS3.2, victim HDF behind Copperline's
+# A2091 Zorro II SCSI board (WD33C93), using Copperline's bundled
+# clean-room open-source A2091 ROM (assets/a2091/copperline-a2091.rom in
+# the Copperline repo -- NOT the real Commodore A2091 firmware already
+# fingerprinted as scsi.device-37.64-a2091.txt). Auto-discovery of the
+# bundled ROM only works for an *installed* copperline binary (next to
+# it, or under share/copperline/a2091/); a target/release/ build needs
+# rom= pointed at it explicitly, as below. Serial to host stdout for -o
+# ser capture.
+#
+# The victim HDF path is relative to the copperline working directory;
+# ci/fingerprint.sh creates it automatically in its scratch workdir.
+# The rom path assumes Simon's kick32.a1200.rom; override as needed.
+
+rom = "/Users/simond/kick32.a1200.rom"
+
+[machine]
+profile = "A1200"
+
+[memory]
+fast = "8M"
+
+[scsi]
+controller = "a2091"
+rom = "/Users/simond/src/external/Copperline/assets/a2091/copperline-a2091.rom"
+unit0 = "victim.hdf"
+
+[serial]
+mode = "stdout"
