@@ -39,7 +39,7 @@ jobs:
             sh -c 'm68k-amigaos-nm devsoak | grep -i utility; exit 0' \
             | tee nm-utility.log
           ! test -s nm-utility.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: devsoak
           path: devsoak
@@ -63,7 +63,7 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: devsoak
       - name: Install Copperline (release AppImage) and xdftool
