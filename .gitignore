@@ -3,3 +3,4 @@ devsoak
 *.hdf
 *.uaem
 site/
+dist/

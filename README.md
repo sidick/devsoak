@@ -467,3 +467,32 @@ partitions on the driver and run filesystem-level stress (e.g.
 FileSystemStressTest from Aminet) while devsoak works a separate range of
 the same unit — filesystems pick different command dialects and catch
 "works with everything except PFS3" bugs.
+
+## Releases
+
+`src/version.h` is the single source of truth for the version: bump
+`DEVSOAK_VERSION` and `DEVSOAK_VERSION_DATE` there and the matching
+`Version:` field in `devsoak.readme`, land that as a normal reviewed PR,
+then push a `v<version>` tag (e.g. `v0.1`) to `main`. That tag drives
+`.github/workflows/release.yml`:
+
+1. `scripts/verify-version.sh` refuses the release if the tag doesn't match
+   both `src/version.h` and `devsoak.readme`, or if the `$VER` date wasn't
+   bumped since the previous release.
+2. `make dist` rebuilds the binary, greps it for the exact
+   `$VER: devsoak <version> (...)` string (a stale `obj/`/`devsoak` would
+   otherwise ship silently), and packs `devsoak`, `devsoak.quirks`,
+   `README.md` and `LICENSE` into `dist/devsoak.lha` alongside
+   `dist/devsoak.readme`.
+3. A GitHub Release is published with the archive attached, then (behind a
+   required-reviewer gate on the `aminet` environment) the same archive is
+   uploaded to Aminet under `dev/misc`.
+
+The `$VER` string (`$VER: devsoak <version> (<date>)`) is what AmigaOS's
+`Version` shell command and utilities like VersionScanner or Aminet's own
+tooling read; check it with `Version devsoak FULL` or, from a host build,
+`strings devsoak | grep '\$VER'`.
+
+## License
+
+BSD 2-Clause. See [`LICENSE`](LICENSE).

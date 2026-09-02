@@ -1,0 +1,38 @@
+name: Release
+
+# Tag-driven releases: a release PR bumps src/version.h + devsoak.readme
+# through normal review/CI, then pushing the matching v<version> tag runs
+# this. verify-version confirms the pushed tag actually matches those two
+# files; release then delegates the build -> GitHub release -> Aminet-
+# upload-behind-required-review pipeline to sidick/amiga-workflows'
+# aminet-release.yml. The $VER-embedded-in-binary check lives in the
+# Makefile's own `dist` target.
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  verify-version:
+    name: Verify tag matches src/version.h / devsoak.readme
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: ./scripts/verify-version.sh "${{ github.ref_name }}"
+
+  release:
+    name: Build, release, and (on approval) publish to Aminet
+    needs: verify-version
+    # A reusable workflow's own `permissions:` can only narrow, never
+    # widen, what the calling job already has - aminet-release.yml's
+    # `gh release create` step needs contents: write, so it has to be
+    # granted here too, not just relied on inside that workflow.
+    permissions:
+      contents: write
+    uses: sidick/amiga-workflows/.github/workflows/aminet-release.yml@v1
+    with:
+      tag: ${{ github.ref_name }}
+      project-name: devsoak
+      lha-path: dist/devsoak.lha
+      readme-path: dist/devsoak.readme
+      category: dev/misc
