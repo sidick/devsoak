@@ -114,6 +114,7 @@ static UBYTE g_can_maxtransfer;
  * the pin table because they gate WHICH tests run, not an observed value */
 static UBYTE stop_skip;    /* CMD_STOP returned IOERR_NOCMD */
 static UBYTE motor_skip;   /* TD_MOTOR returned IOERR_NOCMD */
+static UBYTE flush_skip;   /* CMD_FLUSH returned IOERR_NOCMD */
 
 /* §8 "-B" 4 GB boundary tests (tests 26/27): once-per-run notices, separate
  * from test_skip_check()'s SKIP reporting because these aren't quirk-driven
@@ -719,6 +720,85 @@ run_tier1(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf)
                                      "%s not listed but implemented",
                                      op_cmd_name(cmd));
                     matrix_fail("unlisted-nocmd");
+                }
+            }
+        }
+    }
+
+    /* 14b: flush-gate (§7): after CMD_FLUSH returns, none of THIS
+     * opener's queued requests may still be pending -- each must have
+     * completed or come back IOERR_ABORTED. Queue a 1-sector read on
+     * io1, DoIO CMD_FLUSH on io0, then the read must be done. A driver
+     * without CMD_FLUSH (IOERR_NOCMD, e.g. baseline copperhf) pins and
+     * skips thereafter. */
+    if (!test_skip_check("flush-gate") && !quirk_cmd_skipped(CMD_FLUSH) &&
+        !flush_skip) {
+        /* Completion ORDER, not pending-ness: "after CMD_FLUSH returns,
+         * none of this opener's queued requests may still be pending"
+         * means a successful FLUSH's reply must never reach the port
+         * before the reply of a read queued ahead of it. Polling
+         * CheckIO after a DoIO'd FLUSH is a race an instantaneous
+         * backend always wins; reply order is speed-independent. */
+        ULONG flen = buf->len - (buf->len % ss);
+
+        if ((U64)flen > cfg.range_len * (U64)ss)
+            flen = (ULONG)(cfg.range_len * (U64)ss);
+        if (flen < ss)
+            flen = ss;
+        buf_prefill(buf, 0xA5);
+        op_build_rw(io1, DIALECT_CMD, 0, cfg.range_start * (U64)ss,
+                    buf->data, flen, g_changenum);
+        SendIO((struct IORequest *)io1);
+
+        /* No pre-check needed: if the read completed before the FLUSH
+         * was even sent, its reply is already queued at the port and
+         * arrives first -- the ordering test is self-correcting and
+         * can never false-positive. */
+        {
+            struct Message *first;
+            LONG ferr;
+            UBYTE flush_first;
+
+            io0->iotd_Req.io_Command = CMD_FLUSH;
+            io0->iotd_Req.io_Data = NULL;
+            io0->iotd_Req.io_Length = 0;
+            io0->iotd_Req.io_Offset = 0;
+            io0->iotd_Req.io_Flags = 0;
+            io0->iotd_Req.io_Actual = 0xa5a5a5a5UL;
+            io0->iotd_Req.io_Error = (BYTE)0xa5;
+            io0->iotd_Count = 0;
+            SendIO((struct IORequest *)io0);
+
+            /* both replies land on this task's port; take them in
+             * arrival order */
+            for (;;) {
+                first = GetMsg(io0->iotd_Req.io_Message.mn_ReplyPort);
+                if (first != NULL)
+                    break;
+                WaitPort(io0->iotd_Req.io_Message.mn_ReplyPort);
+            }
+            flush_first = (first == (struct Message *)io0);
+            /* reap the other one too (WaitIO handles reply removal) */
+            if (flush_first)
+                WaitIO((struct IORequest *)io1);
+            else
+                WaitIO((struct IORequest *)io0);
+
+            ferr = (LONG)(BYTE)io0->iotd_Req.io_Error;
+            if (ferr == IOERR_NOCMD) {
+                pin_check("flush-err", (LONG)IOERR_NOCMD);
+                flush_skip = 1;
+            } else if (ferr != 0) {
+                out_task_printf("devsoak: matrix: FAIL flush-gate: "
+                                 "CMD_FLUSH err %ld", (LONG)ferr);
+                matrix_fail("flush-gate");
+            } else {
+                pin_check("flush-err", 0);
+                if (flush_first) {
+                    out_task_printf("devsoak: matrix: FAIL flush-gate: "
+                                     "CMD_FLUSH completed before this "
+                                     "opener's earlier-queued read");
+                    matrix_fail("flush-gate");
                 }
             }
         }
@@ -1371,7 +1451,14 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf, struct timerequest *tio)
                 continue;
 
             breadcrumb(tio, cmd, tsize, off, buf->data);
-            if (stripes_attempt(idx0, tsects)) {
+            /* Blocking obtain, not attempt: this task holds no other
+             * stripes so blocking is deadlock-free (header rule), and an
+             * attempt-and-skip here made the listed-but-NOCMD detection
+             * flaky under worker contention -- a fault could survive a
+             * whole 30 s smoke run undetected. Workers hold stripes only
+             * per-op, so the wait is short. */
+            stripes_obtain(idx0, tsects);
+            {
                 struct Result res;
                 ULONG k;
 
@@ -1397,6 +1484,15 @@ run_tier3(struct IOExtTD *io0, struct TestBuf *buf, struct timerequest *tio)
                     for (k = 0; k < tsects; k++)
                         g_generation[idx0 + k]++;
                     pin_check(pname, 0);
+                } else if (res.err == IOERR_NOCMD && dev.have_nsd &&
+                           nsd_list_has(cmd)) {
+                    /* §8/§14 fault class: a command the driver itself
+                     * advertises in NSCMD_DEVICEQUERY must not NOCMD */
+                    out_task_printf("devsoak: matrix: FAIL format: %s "
+                                     "listed by NSCMD_DEVICEQUERY but "
+                                     "returns IOERR_NOCMD",
+                                     op_cmd_name(cmd));
+                    matrix_fail("format");
                 } else if (res.err == 0) {
                     out_task_printf("devsoak: matrix: FAIL format: %s "
                                      "silent partial, err 0 actual %ld "
@@ -1652,6 +1748,7 @@ invariant_start(void)
     n_skiprep = 0;
     stop_skip = 0;
     motor_skip = 0;
+    flush_skip = 0;
     bigdev_toosmall_notice = 0;
     bigdev_norange_notice = 0;
 

@@ -295,6 +295,19 @@ quirks file, and a one-line `s/startup-sequence` invoking it — e.g.
 devsoak + write devsoak.quirks + makedir s + write ss.txt
 s/startup-sequence`.
 
+`test/acceptance/` holds gzipped serial logs of the §14 acceptance runs:
+the clean copperhf.device baseline, the Kickstart 1.3 A500 run, and the
+fault-injection captures — deliberately broken copperhf.device builds
+whose faults devsoak's 30 s smoke profile caught by name (ignored 64-bit
+high word, dropped last sector at the MaxTransfer boundary, unclamped
+io_Actual on bounds failure, TD_FORMAT64 advertised-but-NOCMD, and a
+silently accepted write past the device end). The sixth fault class —
+CMD_FLUSH returning with a request still queued — has an order-based
+detector (flush-gate: a successful FLUSH's reply must never arrive
+ahead of a request queued before it), but could not be demonstrated
+against copperhf: its completion-drain model retires the whole queue
+whenever it runs, so the reordering is unobservable on that backend.
+
 After devsoak is clean, layer real clients on top: mount FFS/PFS3/SFS
 partitions on the driver and run filesystem-level stress (e.g.
 FileSystemStressTest from Aminet) while devsoak works a separate range of
