@@ -1,0 +1,36 @@
+# devsoak fingerprint (60s classification, -Z)
+driver scsi.device version 47.4
+idstring: scsidisk 47.4 (30.12.2019)
+geometry: sector size 512
+nsd: devtype=5, 28 commands listed
+dialects: CMD TD64 NSD64
+quirk-applied: a3000-sdmac-word-align
+pin bad-unit-err = 50
+pin changestate = 0
+pin clear-err = 0
+pin drivetype-err = -3
+pin flush-err = 0
+pin format-err = 0
+pin format64-err = 0
+pin iof-quick = 0
+pin maxxfer-over = 1
+pin motor-err = 0
+pin motor-off-actual = 0
+pin nsd-undersized-err = -4
+pin nsd64-hiword-err = -5
+pin nsdformat64-err = 0
+pin numtracks-err = -3
+pin past-end-err = 20
+pin protstatus = 0
+pin rawread-err = -3
+pin rawwrite-err = -3
+pin stop-err = 0
+pin stop-gates = 0
+pin td64-hiword-err = -5
+pin unaligned-len-err = -4
+pin unaligned-off-err = 0
+pin update-err = 0
+pin zero-length-actual = 0
+pin zero-length-err = 0
+matrix: 6 full passes, 0 failures, 0 warnings
+RESULT PASS

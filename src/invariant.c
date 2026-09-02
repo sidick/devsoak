@@ -1638,7 +1638,7 @@ inv_entry(void)
         want += ss - (want % ss);
 
     for (;;) {
-        if (buf_alloc(&buf, want, ALIGN_LONG, MEMF_PUBLIC) == 0) {
+        if (buf_alloc(&buf, want, ALIGN_LONG, g_bufmem) == 0) {
             have_buf = 1;
             break;
         }

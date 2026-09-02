@@ -439,6 +439,29 @@ ahead of a request queued before it), but could not be demonstrated
 against copperhf: its completion-drain model retires the whole queue
 whenever it runs, so the reordering is unobservable on that backend.
 
+### Fingerprints
+
+`fingerprints/` is a catalogue of driver behavioural fingerprints — one
+file per (driver, version, controller), each the identity, dialect set
+and sorted pin list from a `ci/fingerprint.sh` classification run.
+`fingerprints/INDEX.md` tabulates them and shows scsi.device's pins
+drifting across OS versions (V37's generic `-1` errors → V45/V47's
+specific codes; TD_GETGEOMETRY and NSD arriving at V36/V40). Commit a
+fingerprint when a driver's behaviour is expected to be stable, and let
+a future run diff against it — a changed pin is a behavioural
+regression the pass/fail verdict alone would miss. `--from-log` reduces
+an existing serial capture (for Kickstart 1.3 boot-floppy targets the
+`--run` staging can't reach); `--no-z` drops the risky tier and
+single-threads, for floppy trackdisk which can't sustain the tier-3
+formats or concurrent access under emulation.
+
+Floppy note: trackdisk.device's Paula DMA reaches only chip RAM, so
+floppy targets need `MEMF_CHIP` buffers. devsoak honours the driver's
+`dg_BufMemType` automatically on Kickstart 2.0+; on 1.3 (no
+TD_GETGEOMETRY) force it with the `floppy-chip-buffers` quirk
+(`-k floppy-chip-buffers`). Without it a floppy read completes having
+transferred nothing and verify sees an untouched buffer.
+
 After devsoak is clean, layer real clients on top: mount FFS/PFS3/SFS
 partitions on the driver and run filesystem-level stress (e.g.
 FileSystemStressTest from Aminet) while devsoak works a separate range of

@@ -156,3 +156,17 @@ because lide.device 40.12 advertises ETD_FORMAT in NSCMD_DEVICEQUERY but
         devsoak under Copperline emulation 2026-09-01.
 action  expect ETD_FORMAT IOERR_NOCMD
 status  reported
+
+quirk   floppy-chip-buffers
+match   name=trackdisk.device
+because Floppy trackdisk.device DMA goes through Paula, which can only
+        address chip RAM. devsoak's default MEMF_PUBLIC buffers may land
+        in fast RAM, where a read completes with no data transferred
+        (verify sees the untouched buffer). On Kickstart 2.0+ the
+        driver's TD_GETGEOMETRY dg_BufMemType already advertises
+        MEMF_CHIP and devsoak honours it automatically; Kickstart 1.3
+        trackdisk predates TD_GETGEOMETRY, so force it there with
+        -k floppy-chip-buffers. Applies to the internal drive and any
+        external floppy on trackdisk.device.
+action  chipbuffers
+status  confirmed

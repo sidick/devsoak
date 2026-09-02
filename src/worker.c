@@ -318,6 +318,7 @@ worker_init_resources(ULONG idx)
     for (j = 0; j < g_qdepth; j++) {
         ULONG alignsel = j % 4;
         ULONG minalign = quirk_min_align();
+        ULONG memflags = g_bufmem;
         LONG  bufrc;
 
         /* honour `align N`: never use a variant weaker than the floor.
@@ -334,15 +335,15 @@ worker_init_resources(ULONG idx)
         if (j == 1 && g_qdepth > 1 && dev.have_geom &&
             dev.geom.dg_BufMemType != 0 &&
             !(quirk_nochip() && (dev.geom.dg_BufMemType & MEMF_CHIP))) {
-            ULONG special = dev.geom.dg_BufMemType | MEMF_PUBLIC;
+            ULONG special = dev.geom.dg_BufMemType | memflags;
 
             bufrc = buf_alloc(&w->buf[j], g_chunk_bytes, alignsel, special);
             if (bufrc != 0)
                 bufrc = buf_alloc(&w->buf[j], g_chunk_bytes, alignsel,
-                                  MEMF_PUBLIC);
+                                  memflags);
         } else {
             bufrc = buf_alloc(&w->buf[j], g_chunk_bytes, alignsel,
-                              MEMF_PUBLIC);
+                              memflags);
         }
         if (bufrc != 0)
             return 1;

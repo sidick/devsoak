@@ -1,0 +1,33 @@
+# devsoak fingerprint (60s classification, -Z)
+driver copperhf.device version 1.0
+idstring: copperhf.device
+geometry: sector size 512
+nsd: devtype=5, 23 commands listed
+dialects: CMD TD64 NSD64
+pin bad-unit-err = -1
+pin changestate = 0
+pin clear-err = 0
+pin drivetype-err = -3
+pin flush-err = -3
+pin format-err = 0
+pin format64-err = 0
+pin iof-quick = 0
+pin maxxfer-over = 1
+pin motor-err = 0
+pin motor-off-actual = 1
+pin nsd-undersized-err = -4
+pin nsd64-hiword-err = -4
+pin nsdformat64-err = 0
+pin numtracks-err = -3
+pin past-end-err = -4
+pin protstatus = 0
+pin rawread-err = -3
+pin rawwrite-err = -3
+pin stop-err = -3
+pin td64-hiword-err = -4
+pin unaligned-len-err = -4
+pin unaligned-off-err = -4
+pin update-err = 0
+pin zero-length-err = -4
+matrix: 5 full passes, 0 failures, 0 warnings
+RESULT PASS

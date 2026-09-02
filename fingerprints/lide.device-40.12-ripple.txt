@@ -1,0 +1,34 @@
+# devsoak fingerprint (60s classification, -Z)
+driver lide.device version 40.12
+idstring: lide 40.12 (03.08.2026) Release-40.12-a387f65
+geometry: sector size 512
+nsd: devtype=5, 30 commands listed
+dialects: CMD ETD TD64 NSD64 NSDETD64
+pin bad-unit-err = 32
+pin changestate = 0
+pin clear-err = 0
+pin drivetype-err = 0
+pin etd-stale-err = 29
+pin flush-err = -3
+pin format-err = -5
+pin format64-err = 0
+pin iof-quick = 0
+pin maxxfer-over = 1
+pin motor-err = 0
+pin motor-off-actual = 0
+pin nsd-undersized-err = -4
+pin nsd64-hiword-err = -5
+pin nsdformat64-err = 0
+pin numtracks-err = -3
+pin past-end-err = -5
+pin protstatus = 0
+pin rawread-err = -3
+pin rawwrite-err = -3
+pin stop-err = 0
+pin td64-hiword-err = -5
+pin unaligned-len-err = 0
+pin unaligned-off-err = 0
+pin update-err = 0
+pin zero-length-err = -4
+matrix: 4 full passes, 0 failures, 0 warnings
+RESULT PASS

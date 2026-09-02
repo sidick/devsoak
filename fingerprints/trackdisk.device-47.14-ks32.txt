@@ -1,0 +1,35 @@
+# devsoak fingerprint (60s classification, -Z)
+driver trackdisk.device version 47.14
+geometry: sector size 512
+nsd: devtype=5, 33 commands listed
+dialects: CMD ETD
+quirk-applied: floppy-chip-buffers
+pin bad-unit-err = 32
+pin changestate = 0
+pin clear-err = 0
+pin drivetype-err = 0
+pin etd-stale-err = 29
+pin flush-err = -3
+pin iof-quick = 0
+pin maxxfer-over = 1
+pin motor-err = 0
+pin motor-off-actual = 255
+pin nsd-undersized-err = -4
+pin numtracks-err = 0
+pin past-end-err = -4
+pin protstatus = 0
+pin rawread-err = 0
+pin rawwrite-err = 0
+pin unaligned-len-err = -4
+pin unaligned-off-err = -4
+pin update-err = 0
+pin zero-length-actual = 512
+pin zero-length-err = 0
+matrix: 1 full passes, 0 failures, 0 warnings
+RESULT FAIL rc=10
+
+# NOTE: intermittent lost-write on sustained floppy writes (stale
+# generation, e.g. sector 550 at -t 60s while clean at -t 30s). A real
+# finding needing root-cause: trackdisk track-buffer flush vs Copperline
+# floppy write model. Fingerprinted no-Z at -w 1 -q 1; -Z (floppy
+# formats) and concurrent -w 2 also stall this driver under emulation.

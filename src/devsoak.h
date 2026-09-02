@@ -302,6 +302,13 @@ extern ULONG g_changenum;           /* ETD dialects' change count */
 extern ULONG g_enabled_dialects[DIALECT_COUNT];
 extern ULONG g_n_enabled;           /* probe-verified dialect set */
 extern ULONG g_chunk_bytes;         /* per-request transfer cap */
+/* Memory flags every I/O buffer must satisfy (worker slots, audit,
+ * invariant, fill). Set by engine setup() from the driver's
+ * dg_BufMemType (trackdisk floppy reports MEMF_CHIP -- Paula disk DMA
+ * reaches only chip RAM) and forced to MEMF_CHIP by the `chipbuffers`
+ * quirk. Default MEMF_PUBLIC. buf_alloc callers OR this into their
+ * memflags. */
+extern ULONG g_bufmem;
 
 /* ---- stripe.c (§6): one SignalSemaphore per -S sectors ----
  * Deadlock rule: workers NEVER block on stripes -- stripes_attempt()
@@ -398,6 +405,7 @@ ULONG quirk_test_warn(const char *test);       /* `warn TEST` */
 /* global caps */
 ULONG quirk_min_align(void);        /* `align N` bytes; 0 = no floor */
 ULONG quirk_nochip(void);           /* `nochip` */
+ULONG quirk_chipbuffers(void);      /* `chipbuffers`: all buffers MEMF_CHIP */
 ULONG quirk_maxinflight(void);      /* `maxinflight N`; 0 = unlimited */
 ULONG quirk_maxxfer(void);          /* `maxxfer BYTES`; 0 = no cap */
 ULONG quirk_norandomcmd(void);      /* `norandomcmd` */

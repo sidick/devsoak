@@ -1,0 +1,24 @@
+# devsoak fingerprint (60s classification, -Z)
+driver trackdisk.device version 34.1
+geometry: unavailable
+nsd: none
+dialects: CMD ETD
+quirk-applied: floppy-chip-buffers
+pin changestate = 0
+pin clear-err = 0
+pin drivetype-err = 0
+pin etd-stale-err = 29
+pin flush-err = -3
+pin iof-quick = 0
+pin maxxfer-over = 1
+pin numtracks-err = 0
+pin protstatus = 0
+pin rawread-err = 0
+pin rawwrite-err = 0
+pin unaligned-len-err = -4
+pin unaligned-off-err = -4
+pin update-err = 0
+pin zero-length-actual = 512
+pin zero-length-err = 0
+matrix: 0 full passes, 0 failures, 0 warnings
+RESULT PASS

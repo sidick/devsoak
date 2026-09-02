@@ -35,6 +35,7 @@ ULONG  g_changenum;
 ULONG  g_enabled_dialects[DIALECT_COUNT];
 ULONG  g_n_enabled;
 ULONG  g_chunk_bytes;
+ULONG  g_bufmem;
 
 /* ---- module state: setup()/fill_pass()/cleanup() only run single-task,
  * before stripes/workers/the auditor exist, so file statics are fine for
@@ -201,6 +202,20 @@ setup(void)
         out_printf("devsoak: TD_CHANGENUM unavailable, ETD dialects disabled");
     }
 
+    /* buffer memory type: floppy trackdisk.device DMA (Paula) reaches only
+     * chip RAM, so a quirk or the driver's own TD_GETGEOMETRY answer can
+     * force MEMF_CHIP here; everything else stays MEMF_PUBLIC. */
+    g_bufmem = MEMF_PUBLIC;
+    if (quirk_chipbuffers()) {
+        g_bufmem = MEMF_CHIP | MEMF_PUBLIC;
+    } else if (dev.have_geom && (dev.geom.dg_BufMemType & MEMF_CHIP)) {
+        g_bufmem = (dev.geom.dg_BufMemType & (MEMF_CHIP | MEMF_FAST | MEMF_PUBLIC))
+                   | MEMF_PUBLIC;
+    }
+    out_printf("devsoak: buffer memory: %s",
+               (g_bufmem & MEMF_CHIP) ? "chip (driver DMA requires it)"
+                                       : "public");
+
     /* chunk size: cfg.maxxfer rounded down to a sector multiple, halving
      * (and re-rounding) on allocation failure, down to one sector. Only
      * one buffer now (wbuf): M2's rbuf/r2buf belonged to verify_sweep and
@@ -225,7 +240,7 @@ setup(void)
     }
 
     for (;;) {
-        if (buf_alloc(&wbuf, try_bytes, ALIGN_LONG, MEMF_PUBLIC) == 0) {
+        if (buf_alloc(&wbuf, try_bytes, ALIGN_LONG, g_bufmem) == 0) {
             g_chunk_bytes = try_bytes;
             break;
         }

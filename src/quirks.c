@@ -98,6 +98,7 @@ struct MatchCond {
 #define ACT_MAXXFER     7
 #define ACT_NORANDOMCMD 8
 #define ACT_TIER        9
+#define ACT_CHIPBUFFERS 10
 
 struct Action {
     UBYTE verb;
@@ -158,6 +159,7 @@ static ULONG            n_warns;
 
 static ULONG g_align_min;      /* max of all `align N`; 0 = no floor */
 static UBYTE g_nochip;
+static UBYTE g_chipbuffers;
 static ULONG g_maxinflight;    /* min of all nonzero `maxinflight N`; 0 = unlimited */
 static ULONG g_maxxfer;        /* min of all nonzero `maxxfer N`; 0 = no cap */
 static UBYTE g_norandomcmd;
@@ -686,6 +688,8 @@ static void parse_action_line(struct QuirkEntry *e, char *rest)
         a->verb = ACT_ALIGN; a->numval = (ULONG)parse_dec_signed(args);
     } else if (ci_eq(verb, "nochip")) {
         a->verb = ACT_NOCHIP;
+    } else if (ci_eq(verb, "chipbuffers")) {
+        a->verb = ACT_CHIPBUFFERS;
     } else if (ci_eq(verb, "maxinflight")) {
         a->verb = ACT_MAXINFLIGHT; a->numval = (ULONG)parse_dec_signed(args);
     } else if (ci_eq(verb, "maxxfer")) {
@@ -787,6 +791,10 @@ static void apply_entry(ULONG idx)
 
         case ACT_NOCHIP:
             g_nochip = 1;
+            break;
+
+        case ACT_CHIPBUFFERS:
+            g_chipbuffers = 1;
             break;
 
         case ACT_MAXINFLIGHT:
@@ -932,7 +940,7 @@ LONG quirks_load(void)
     applied_count = 0;
     entries_full_warned = 0;
     n_skip = 0; n_expects = 0; n_warns = 0; n_skiptests = 0;
-    g_align_min = 0; g_nochip = 0; g_maxinflight = 0; g_maxxfer = 0;
+    g_align_min = 0; g_nochip = 0; g_chipbuffers = 0; g_maxinflight = 0; g_maxxfer = 0;
     g_norandomcmd = 0; g_tier = -1;
     g_total_actions = 0; g_actions_full_warned = 0; skip_overflow_warned = 0;
 
@@ -1106,6 +1114,7 @@ ULONG quirk_test_warn(const char *test)
 
 ULONG quirk_min_align(void)      { return g_align_min; }
 ULONG quirk_nochip(void)         { return g_nochip; }
+ULONG quirk_chipbuffers(void)    { return g_chipbuffers; }
 ULONG quirk_maxinflight(void)    { return g_maxinflight; }
 ULONG quirk_maxxfer(void)        { return g_maxxfer; }
 ULONG quirk_norandomcmd(void)    { return g_norandomcmd; }

@@ -217,7 +217,7 @@ sweep(const char *label, volatile UBYTE *stop)
     io->iotd_Req.io_Device = dev.io->iotd_Req.io_Device;
     io->iotd_Req.io_Unit   = dev.io->iotd_Req.io_Unit;
 
-    if (buf_alloc(&buf, g_chunk_bytes, ALIGN_LONG, MEMF_PUBLIC) != 0) {
+    if (buf_alloc(&buf, g_chunk_bytes, ALIGN_LONG, g_bufmem) != 0) {
         out_task_printf("devsoak: audit(%s): buffer allocation failed", label);
         DeleteExtIO((struct IORequest *)io);
         DeletePort(port);
