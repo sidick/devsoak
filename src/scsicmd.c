@@ -7,8 +7,8 @@
  * no stripe locks) and prints with out_printf() (never out_task_printf() --
  * there is no cross-task queue to drain yet and main is the only task).
  *
- * If the driver does not implement HD_SCSICMD at all (the MIRAGE case),
- * the very first probe (INQUIRY) comes back IOERR_NOCMD; that is reported
+ * If the driver does not implement HD_SCSICMD at all, the very first
+ * probe (INQUIRY) comes back IOERR_NOCMD; that is reported
  * and treated as a clean, not-applicable result (RC_CLEAN), not a failure
  * -- the option asked for tests the driver cannot take part in.
  */

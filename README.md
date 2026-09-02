@@ -10,8 +10,8 @@ device drivers. One run answers two questions:
    overlapping reads, writes and housekeeping commands, with multiple
    requests in flight?
 
-Primary targets are copperhf.device and the MIRAGE ROM driver, but devsoak
-works against any trackdisk-compatible device (scsi.device, lide.device,
+The primary target is copperhf.device, but devsoak works against any
+trackdisk-compatible device (scsi.device, lide.device, oktagon.device,
 uaehf.device, trackdisk.device) so results can be compared against
 known-good drivers.
 
