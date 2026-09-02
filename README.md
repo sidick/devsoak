@@ -391,6 +391,13 @@ quirks file, and a one-line `s/startup-sequence` invoking it — e.g.
 devsoak + write devsoak.quirks + makedir s + write ss.txt
 s/startup-sequence`.
 
+`test/acceptance/` also holds `soak-7.9h-lide.log.gz`: a 61 MB-range
+soak against lide.device (`-w 4 -q 6 -A 15 -X`) that ran clean —
+0 errors across 2614 status intervals and six clean periodic
+full-range audits — for 7.9 of its 8 hours before the emulator
+session's scheduled end cut it short of the final audit and verdict
+line. The full exit-0 8-hour run on real hardware remains open.
+
 `test/acceptance/` holds gzipped serial logs of the §14 acceptance runs:
 the clean copperhf.device baseline, the Kickstart 1.3 A500 run, and the
 fault-injection captures — deliberately broken copperhf.device builds
