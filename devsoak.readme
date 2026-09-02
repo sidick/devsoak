@@ -6,6 +6,19 @@ Version:      0.1
 Architecture: m68k-amigaos >= 3.0; m68k-aros
 Requires:     68000
 
+*** WARNING: THIS IS A DESTRUCTIVE TESTING TOOL ***
+
+devsoak deliberately overwrites every sector in the range you point it at,
+issues edge-case and malformed commands, and drives a driver to its
+limits for hours at a time. It is built for developers and testers who
+understand block device internals and have deliberately chosen a sector
+range, partition, or whole device they do not mind losing. Point it at
+the wrong unit number and it WILL destroy live data - there is no
+confirmation beyond the -y flag you pass it yourself, and no undo.
+
+If you are not comfortable identifying your target device's unit number
+with certainty, back up first, or do not run this tool.
+
 devsoak is a destructive correctness and soak tester for trackdisk-style
 AmigaOS block device drivers. One run answers two questions: does every
 command the driver accepts do the right thing - including the edge cases
@@ -28,13 +41,13 @@ This release ships:
                      see README.md's Quirks section); devsoak looks for
                      this file beside its own binary
 
-devsoak is destructive: it will overwrite the sector range you point it
-at. Never run it against a range holding data you want to keep.
-
 Requirements
 ------------
-  - AmigaOS 3.0+ (KS 1.3 is also supported at reduced dialect coverage)
-    or AROS m68k, 68000 or better.
+  - AmigaOS, Kickstart 1.3 or later, or AROS m68k, 68000 or better.
+    devsoak probes the driver under test at startup and exercises
+    whichever command dialects (CMD/ETD/TD64/NSD/NSD-ETD) it actually
+    advertises - so a 1.3-era driver simply advertises fewer dialects
+    itself, rather than devsoak testing less on 1.3.
   - A block device to test, and a sector range on it you do not need.
 
 Quick start
