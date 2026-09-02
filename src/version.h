@@ -10,8 +10,8 @@
  *
  * DEVSOAK_VERSION_DATE is the AmigaOS $VER date, <dd>.<mm>.<yyyy> per
  * https://wiki.amigaos.net/wiki/Version_Strings */
-#define DEVSOAK_VERSION      "0.1"
-#define DEVSOAK_VERSION_DATE "01.09.2026"
+#define DEVSOAK_VERSION      "1.0"
+#define DEVSOAK_VERSION_DATE "02.09.2026"
 
 /* Embedded AmigaOS version string, findable by the shell `Version` command.
  * The leading "\0" guards against an adjacent string in the binary running
