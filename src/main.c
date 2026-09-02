@@ -158,16 +158,17 @@ main(int argc, char **argv)
             dev.have_geom = 1;
             dev.sector_size = ss;
             dev.total_sectors = (U64)dev.geom.dg_TotalSectors;
-        } else if (io->iotd_Req.io_Error == IOERR_NOCMD) {
+        } else {
+            /* Pre-V36 drivers predate TD_GETGEOMETRY entirely; they
+             * answer IOERR_NOCMD or whatever their dispatcher falls
+             * into (A2091 7.0: -1). Either way: no geometry, fall back
+             * to the range end as the device size (§16.5). */
             dev.have_geom = 0;
             dev.sector_size = 512;
-            out_printf("devsoak: warning: TD_GETGEOMETRY unsupported (IOERR_NOCMD);"
-                       " assuming 512-byte sectors and using the range end as device size");
-        } else {
-            out_printf("devsoak: TD_GETGEOMETRY failed, io_Error %ld",
-                        (LONG)io->iotd_Req.io_Error);
-            rc = RC_FATAL;
-            goto cleanup_close;
+            out_printf("devsoak: warning: TD_GETGEOMETRY failed (io_Error "
+                       "%ld); assuming 512-byte sectors and using the "
+                       "range end as device size",
+                       (LONG)(BYTE)io->iotd_Req.io_Error);
         }
     }
 

@@ -68,15 +68,17 @@ status  reported
 
 quirk   a3000-sdmac-word-align
 match   name=scsi.device
-because On an A3000 (SDMAC-04 + Ramsey-04), odd-address DMA buffers are
-        unsafe: the last two bytes of a transfer have been reported as
-        left unwritten (devtest README). There is no A3000-vs-other-
-        machine match key in this parser, so this entry matches every
-        scsi.device everywhere; it is deliberately left at a status that
-        never auto-applies. Force it explicitly with -k a3000-sdmac-word-
-        align only when the run is actually on an A3000, and treat a
-        trailing-byte miscompare as a warning rather than a hard failure.
-action  align 2
+because On an A3000 (SDMAC + Ramsey), non-LONGWORD-aligned DMA buffers
+        are unsafe. devtest's README reported odd-address trouble (last
+        two bytes unwritten); devsoak reproduced something stronger
+        under Copperline's SDMAC emulation, scsi.device 47.4: a read
+        into a word-aligned (+2) buffer arrives shifted left by two
+        bytes wholesale. align 4 (not 2) makes every soak clean. There
+        is no A3000-vs-other-machine match key in this parser, so this
+        entry matches every scsi.device everywhere; it is deliberately
+        left at a status that never auto-applies. Force it with
+        -k a3000-sdmac-word-align when the run is on an A3000.
+action  align 4
 action  warn payload
 status  reported
 
@@ -89,6 +91,22 @@ because The A2091/A590 DMA controller needs word-aligned buffers. As with
         force-only: use -k a2091-dma-align when the run is known to be on
         an A2091/A590.
 action  align 2
+status  reported
+
+quirk   a2091-37-unaligned-length-hang
+match   name=scsi.device version=37 id~SCSI/XT
+because scsi.device 37.64 from the A2091 PDMA-07 boot ROM hard-wedges
+        the machine (black screen, no recovery) on a CMD_READ whose
+        io_Length is not a sector multiple. Reproduced with devsoak
+        under Copperline emulation 2026-09-02: the run stops exactly at
+        the unaligned-length matrix test every time, and skipping that
+        one test yields a clean full soak (RESULT PASS, -Z included --
+        random command numbers and unadvertised TD64 dialects are all
+        rejected cleanly, so the classic V37 jump-table fear did not
+        materialise on this ROM). Also: TD_GETGEOMETRY and
+        NSCMD_DEVICEQUERY both fail with -1 (predate the driver), no
+        ETD dialect.
+action  skiptest unaligned-length
 status  reported
 
 quirk   removable-stop-ejects

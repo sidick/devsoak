@@ -278,6 +278,34 @@ offset would truncate and false-fail — thanks to LIV2 for flagging the
 same hazard independently), and skip when the driver has no 64-bit
 dialect at all.
 
+Further fingerprints collected under Copperline (60 s classification
+runs; all `reported` pending real-hardware confirmation):
+
+- **A2091 PDMA-07 ROM, scsi.device 37.64** ("SCSI/XT driver"): no
+  TD_GETGEOMETRY/NSD/ETD (all fail -1), implements CMD_FLUSH correctly,
+  honours over-MaxTransfer, bad-unit error 50 — and **hard-wedges the
+  machine on a read whose io_Length is not a sector multiple** (see
+  quirk `a2091-37-unaligned-length-hang`). `-Z` is otherwise clean:
+  random command numbers and unadvertised TD64 are rejected, so the
+  classic V37 unchecked-jump-table fear did not materialise here.
+- **A3000 motherboard SDMAC, scsi.device 47.4**: reads into buffers
+  that are not longword-aligned arrive **shifted left by two bytes
+  wholesale** (a word-aligned +2 buffer is enough to trigger it);
+  `align 4` makes the full `-Z` soak clean. The
+  `a3000-sdmac-word-align` seed quirk now carries align 4.
+- **A4091, original Commodore ROM**: not classifiable yet — the guest
+  black-screens during the board ROM's init under Copperline (the CBM
+  driver busy-polls a 53C710 status path the emulator's model, built
+  against the open ROM, never raises). Emulator-side item, not a
+  driver finding.
+- **A4091 open-source ROM, a4091.device 42.39**: full CMD/ETD/TD64/NSD
+  set (stale ETD count → TDERR_DiskChanged), SCSI-sense-derived error
+  52 for past-end and high-word garbage, all FORMAT variants work,
+  CMD_STOP/START clean — but **TD_MOTOR succeeds without ever writing
+  io_Actual** (devsoak's 0xA5A5A5A5 sentinel survives; a stale result
+  field, upstream-reportable), and NSCMD_ETD_READ64 works without
+  being advertised in the NSD list.
+
 Driver-caching notes learned the hard way: trackdisk.device serves
 repeat reads of the same track from its RAM track buffer without
 touching the hardware (so an ejected disk keeps "reading" — the -R
