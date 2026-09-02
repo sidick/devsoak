@@ -1,0 +1,46 @@
+# devsoak fingerprint (60s classification, -Z)
+driver oktagon.device version 6.10
+idstring: oktagon.device 6.10 (26.08.95)
+geometry: sector size 512
+nsd: none
+dialects: CMD
+pin bad-unit-err = 32
+pin changestate = 0
+pin clear-err = 0
+pin drivetype-err = 0
+pin flush-err = -3
+pin format-err = 0
+pin iof-quick = 1
+pin maxxfer-over = 1
+pin motor-err = 0
+pin motor-off-actual = 1
+pin numtracks-err = 0
+pin past-end-err = 21
+pin protstatus = 0
+pin rawread-err = -3
+pin rawwrite-err = -3
+pin unaligned-len-err = -4
+pin unaligned-off-err = -4
+pin update-err = 0
+pin zero-length-actual = 0
+pin zero-length-err = 0
+finding: FAIL stop-start: CMD_STOP err 45
+matrix: 3 full passes, 3 failures, 0 warnings
+RESULT FAIL rc=10
+
+# UNSTABLE under devsoak on Copperline's atbus2008 board (ALF/AlfaPower
+# AT610 ROM, oktagon.device 6.10, 1995). Results are non-deterministic
+# across runs:
+#  - bounds: one run rejected read-past-end (err 21), another let it
+#    silently succeed; straddle-end likewise intermittent.
+#  - concurrent load: intermittent CMD_READ/CMD_WRITE failures with
+#    err 45 (HFERR_BadStatus) and spurious err 29 (TDERR_DiskChanged
+#    with no media change), and io_Actual left as the 0xA5A5A5A5
+#    sentinel on those errors (driver not clearing the result field).
+#  - CMD_STOP returns err 45.
+# Only DIALECT_CMD; pre-NSD, no ETD (TD_CHANGENUM probe fails).
+# Open question for the Copperline maintainer: is this oktagon.device's
+# own fragility, or an atbus2008 emulation-compatibility gap? Copperline's
+# atbus2008 register model was validated against LIV2 lide.device, not the
+# original ALF/oktagon ROM, so the status/error path this driver polls may
+# differ. A real-hardware run would disambiguate.
