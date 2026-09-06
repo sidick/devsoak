@@ -1285,6 +1285,13 @@ LONG quirks_resume_report(void)
     }
     out_printf("status  suspected");
 
+    if (cfg.partition) {
+        out_printf("devsoak: resume: this was a partition-mode run (%s); "
+                   "if the crash happened after inhibit, the DOS device "
+                   "may still be inhibited -- Mount/reboot to clear it.",
+                   cfg.dosdev != NULL ? cfg.dosdev : "?");
+    }
+
     FreeMem(filebuf, FILEBUF_MAX + 1);
     return RC_CLEAN;
 }

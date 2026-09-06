@@ -495,12 +495,29 @@ main(int argc, char **argv)
         goto cleanup_close;
     }
 
+    /* partition mode: inhibit the handler before any test traffic so the
+     * filesystem doesn't fight it (§ README "Partition mode"). Every exit
+     * path from here on falls through to cleanup_close, which uninhibits
+     * unconditionally (a no-op unless dosdev_inhibit() actually set
+     * `inhibited`). */
+    if (cfg.partition && have_partinfo) {
+        if (dosdev_inhibit(pinfo.handler, &inhibited) != 0) {
+            crumb_close();
+            quirks_cleanup();
+            rc = RC_FATAL;
+            goto cleanup_close;
+        }
+    }
+
     rc = engine_run();
 
     crumb_close();
     quirks_cleanup();
 
 cleanup_close:
+    if (cfg.partition && have_partinfo)
+        dosdev_uninhibit(pinfo.handler, &inhibited);
+
     if (opened) {
         CloseDevice((struct IORequest *)io);
         opened = 0;
