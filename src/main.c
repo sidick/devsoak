@@ -415,12 +415,62 @@ main(int argc, char **argv)
     out_printf("devsoak: workers %ld, qdepth %ld, duration %ld s",
                 (LONG)cfg.workers, (LONG)cfg.qdepth, (LONG)cfg.duration_s);
 
-    /* confirmation (skipped with -y) */
-    if (!cfg.yes) {
+    /* confirmation. Partition mode escalates in three tiers (§ README
+     * "Partition mode"): no signature/no volume behaves exactly like the
+     * plain -r form below; a filesystem signature with no live volume
+     * adds a warning line ahead of the same y/n; a live mounted volume
+     * requires typing the volume name back and -y does not bypass it --
+     * this is destroying a filesystem someone still has open. */
+    if (cfg.partition && have_partinfo && pinfo.have_volume) {
         if ((SetSignal(0, 0) & SIGBREAKF_CTRL_C) != 0) {
             out_printf("devsoak: aborted (break)");
             rc = RC_FATAL;
             goto cleanup_close;
+        }
+
+        /* policy: see PR discussion -- -y is deliberately not honoured
+         * for a live mounted volume, unlike every other confirmation
+         * tier; this is under review. */
+        if (cfg.yes) {
+            out_printf("devsoak: %s: volume \"%s:\" is live-mounted; -y "
+                       "does not bypass this confirmation. Run "
+                       "interactively.", cfg.dosdev, pinfo.volname);
+            rc = RC_FATAL;
+            goto cleanup_close;
+        }
+
+        out_printf("devsoak: %s: volume \"%s:\" is live-mounted on this "
+                   "partition.", cfg.dosdev, pinfo.volname);
+        out_printf("This will DESTROY it. Type the volume name (%s) to "
+                   "continue:", pinfo.volname);
+        {
+            BPTR cin = Input();
+            char ansbuf[80];
+            LONG n = Read(cin, ansbuf, (LONG)sizeof(ansbuf) - 1);
+
+            if (n > 0) {
+                while (n > 0 && (ansbuf[n - 1] == '\n' || ansbuf[n - 1] == '\r'))
+                    n--;
+                ansbuf[n] = '\0';
+            } else {
+                ansbuf[0] = '\0';
+            }
+            if (!main_ci_eq(ansbuf, pinfo.volname)) {
+                out_printf("devsoak: aborted (volume name did not match)");
+                rc = RC_FATAL;
+                goto cleanup_close;
+            }
+        }
+    } else if (!cfg.yes) {
+        if ((SetSignal(0, 0) & SIGBREAKF_CTRL_C) != 0) {
+            out_printf("devsoak: aborted (break)");
+            rc = RC_FATAL;
+            goto cleanup_close;
+        }
+
+        if (cfg.partition && have_sig) {
+            out_printf("devsoak: %s: partition contains a %s filesystem "
+                       "(no live volume mounted).", cfg.dosdev, signame);
         }
 
         out_printf("This will DESTROY data in the above range. Continue? (y/N)");
