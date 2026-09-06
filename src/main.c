@@ -11,6 +11,7 @@
 #include <proto/alib.h>
 #include <exec/errors.h>
 #include <dos/dos.h>
+#include <string.h>
 
 /* globals declared extern in devsoak.h */
 struct Config       cfg;
@@ -62,6 +63,27 @@ u64_to_str(U64 v, char *buf)
     buf[i] = '\0';
 }
 
+/* case-insensitive compare (no strcasecmp on this toolchain; same pattern
+ * as quirks.c's ci_eq()) -- used only for the partition-mode volume-name
+ * confirmation below. */
+static int
+main_tolower(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+    return c;
+}
+
+static UBYTE
+main_ci_eq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (main_tolower((unsigned char)*a) != main_tolower((unsigned char)*b))
+            return 0;
+        a++; b++;
+    }
+    return (*a == '\0' && *b == '\0') ? 1 : 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -73,6 +95,13 @@ main(int argc, char **argv)
     ULONG s0, u0;
     char numbuf1[24];
     char numbuf2[24];
+    /* partition mode (§ dosdev.c) */
+    struct PartInfo pinfo;
+    UBYTE have_partinfo = 0;
+    UBYTE inhibited = 0;
+    UBYTE have_sig = 0;
+    char  signame[8];
+    U64   part_boot_lba = 0;
 
     if (args_parse(argc, argv) != 0) {
         out_init(OUT_CON);
@@ -103,6 +132,19 @@ main(int argc, char **argv)
         cfg.seed = s0 ^ u0;
     }
 
+    /* partition mode: resolve NAME: to the exec device/unit/geometry it
+     * is mounted on before opening anything. dosdev_resolve() prints its
+     * own one-line failure reason. */
+    if (cfg.partition) {
+        if (dosdev_resolve(cfg.dosdev, &pinfo) != 0) {
+            rc = RC_FATAL;
+            goto cleanup_close;
+        }
+        have_partinfo = 1;
+        cfg.device = pinfo.devname;
+        cfg.unit = pinfo.unit;
+    }
+
     port = CreatePort(NULL, 0);
     if (port == NULL) {
         out_printf("devsoak: CreatePort failed");
@@ -118,7 +160,8 @@ main(int argc, char **argv)
     }
 
     operr = OpenDevice((CONST_STRPTR)cfg.device, cfg.unit,
-                       (struct IORequest *)io, 0);
+                       (struct IORequest *)io,
+                       cfg.partition ? pinfo.opendevice_flags : 0);
     if (operr != 0) {
         out_printf("devsoak: OpenDevice(%s,%ld) failed, io_Error %ld",
                     cfg.device, cfg.unit, (LONG)io->iotd_Req.io_Error);
@@ -219,6 +262,110 @@ main(int argc, char **argv)
     if (quirks_load() != 0) {
         rc = RC_FATAL;
         goto cleanup_close;
+    }
+
+    /* partition mode: turn the mounted partition's extent (envec blocks,
+     * de_LowCyl/de_HighCyl) into a device-sector range, exactly as -r
+     * would express it, absolute from LBA 0. envec blocks are
+     * de_SizeBlock*4 bytes; devsoak works in dev.sector_size units, so a
+     * clean integer scale between the two is required. */
+    if (cfg.partition) {
+        ULONG envec_bytes = pinfo.sizeblock * 4;
+        ULONG scale;
+        U64   blocks_per_cyl, part_start, part_len;
+
+        if (envec_bytes == 0 || dev.sector_size == 0 ||
+            envec_bytes % dev.sector_size != 0) {
+            out_printf("devsoak: %s: envec block size %ld bytes is not a "
+                       "multiple of the device sector size %ld bytes",
+                       cfg.dosdev, (LONG)envec_bytes, (LONG)dev.sector_size);
+            rc = RC_FATAL;
+            goto cleanup_close;
+        }
+        scale = envec_bytes / dev.sector_size;
+
+        blocks_per_cyl = (U64)pinfo.surfaces * (U64)pinfo.blockspertrack;
+        part_start = (U64)pinfo.lowcyl * blocks_per_cyl * (U64)scale;
+        part_len = ((U64)pinfo.highcyl - (U64)pinfo.lowcyl + 1) *
+                   blocks_per_cyl * (U64)scale;
+        part_boot_lba = part_start;
+
+        if (cfg.have_range) {
+            /* -r was also given: a relative sub-range within the
+             * partition, for low-RAM machines (§ README "Partition
+             * mode"). */
+            if (cfg.range_start + cfg.range_len > part_len) {
+                u64_to_str(part_len, numbuf1);
+                out_printf("devsoak: -r sub-range exceeds the partition "
+                           "(%s sectors)", numbuf1);
+                rc = RC_FATAL;
+                goto cleanup_close;
+            }
+            cfg.range_start = part_start + cfg.range_start;
+        } else {
+            cfg.range_start = part_start;
+            cfg.range_len = part_len;
+        }
+        cfg.have_range = 1;
+
+        {
+            U64 endsec = cfg.range_start + cfg.range_len;
+            U64 mb = (cfg.range_len * (U64)dev.sector_size) / (1024 * 1024);
+
+            u64_to_str(cfg.range_start, numbuf1);
+            u64_to_str(endsec, numbuf2);
+            out_printf("devsoak: %s = %s unit %ld, partition sectors %s..%s",
+                        cfg.dosdev, cfg.device, (LONG)cfg.unit,
+                        numbuf1, numbuf2);
+            u64_to_str(mb, numbuf1);
+            out_printf("devsoak: %s size: %s MB", cfg.dosdev, numbuf1);
+        }
+
+        /* contents warning (§ README "Partition mode"): read the
+         * partition's boot block and look for a known filesystem
+         * signature in its first 4 bytes. Best-effort only -- a
+         * partition starting at or past the 4 GB boundary can't be
+         * addressed with a plain CMD_READ here (this runs before the
+         * engine's dialect probing), so the check is skipped for it and
+         * the confirmation falls back to the plain y/n tier. */
+        if (part_boot_lba * (U64)dev.sector_size < 0x100000000ULL) {
+            UBYTE *scratch = AllocMem(dev.sector_size,
+                                       MEMF_PUBLIC | MEMF_CLEAR);
+            if (scratch != NULL) {
+                io->iotd_Req.io_Command = CMD_READ;
+                io->iotd_Req.io_Data = scratch;
+                io->iotd_Req.io_Length = dev.sector_size;
+                io->iotd_Req.io_Offset =
+                    (ULONG)(part_boot_lba * (U64)dev.sector_size);
+                io->iotd_Req.io_Flags = 0;
+                DoIO((struct IORequest *)io);
+
+                if (io->iotd_Req.io_Error == 0 &&
+                    io->iotd_Req.io_Actual >= 4) {
+                    if (memcmp(scratch, "muFS", 4) == 0) {
+                        strcpy(signame, "muFS");
+                        have_sig = 1;
+                    } else if (memcmp(scratch, "DOS", 3) == 0 ||
+                               memcmp(scratch, "PFS", 3) == 0 ||
+                               memcmp(scratch, "PDS", 3) == 0 ||
+                               memcmp(scratch, "SFS", 3) == 0) {
+                        signame[0] = (char)scratch[0];
+                        signame[1] = (char)scratch[1];
+                        signame[2] = (char)scratch[2];
+                        signame[3] = '\\'; signame[4] = 'x';
+                        {
+                            UBYTE v = scratch[3];
+                            static const char hex[] = "0123456789abcdef";
+                            signame[5] = hex[(v >> 4) & 0xF];
+                            signame[6] = hex[v & 0xF];
+                        }
+                        signame[7] = '\0';
+                        have_sig = 1;
+                    }
+                }
+                FreeMem(scratch, dev.sector_size);
+            }
+        }
     }
 
     /* validate range against device size */

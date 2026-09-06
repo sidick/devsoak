@@ -90,7 +90,10 @@ struct NSDQueryResult {
 struct Config {
     char   *device;             /* device name, e.g. "uaehf.device" */
     LONG    unit;
-    U64     range_start;        /* -r, in sectors */
+    UBYTE   partition;          /* positional arg was NAME: (partition mode) */
+    char   *dosdev;             /* the raw NAME: argument, incl. ':' */
+    U64     range_start;        /* -r, in sectors (partition mode: relative
+                                    to the partition start until resolved) */
     U64     range_len;          /* -r, in sectors */
     ULONG   duration_s;         /* -t, seconds (default 60) */
     ULONG   workers;            /* -w (default 4) */
@@ -148,6 +151,41 @@ struct DevUnderTest {
 
 extern struct Config       cfg;
 extern struct DevUnderTest dev;
+
+/* ---- dosdev.c: partition mode (`devsoak DH1: -d [options]`) ----
+ * Resolves a DOS device name (a single positional argument ending in ':')
+ * to the exec device/unit and partition extent it is mounted on, by
+ * walking the DosList: LockDosList()/FindDosEntry() on V36+, a manual
+ * Forbid()-protected walk of DOSBase->dl_Root->rn_Info->di_DevInfo on
+ * Kickstart 1.3 (same struct DosList layout either way -- BCPL BPTR/BSTR
+ * fields throughout, hence BADDR() everywhere below). Every field is
+ * validated before use (§ args_parse must never print, so all of this
+ * runs from main() after out_init(), and prints its own one-line reason
+ * on failure). Callers treat a nonzero return as RC_FATAL. */
+
+struct PartInfo {
+    char             devname[64];   /* exec device name, e.g. "scsi.device" */
+    LONG             unit;          /* fssm_Unit */
+    ULONG            opendevice_flags; /* fssm_Flags, passed to OpenDevice() */
+    ULONG            sizeblock;     /* de_SizeBlock, in LONGWORDS */
+    ULONG            surfaces;      /* de_Surfaces */
+    ULONG            blockspertrack;/* de_BlocksPerTrack */
+    ULONG            lowcyl;        /* de_LowCyl */
+    ULONG            highcyl;       /* de_HighCyl */
+    struct MsgPort  *handler;       /* dol_Task; NULL = handler never started */
+    UBYTE            have_volume;   /* a DLT_VOLUME entry names this handler */
+    char             volname[64];   /* if have_volume: its BSTR name, as C */
+};
+
+LONG dosdev_resolve(const char *name, struct PartInfo *out);
+/* ACTION_INHIBIT the handler (dp_Arg1 = DOSTRUE); DoPkt() on V36+, a
+ * hand-rolled struct StandardPacket on Kickstart 1.3. Prints its own
+ * failure reason and returns nonzero (RC_FATAL) on refusal. *inhibited is
+ * set on success, left 0 if handler is NULL (nothing to inhibit) or the
+ * packet failed; pass the same variable to dosdev_uninhibit() unchanged
+ * on every exit path -- it is a no-op unless *inhibited is set. */
+LONG dosdev_inhibit(struct MsgPort *handler, UBYTE *inhibited);
+void dosdev_uninhibit(struct MsgPort *handler, UBYTE *inhibited);
 
 /* ---- PRNG: xorshift32, one state per task (§13) ---- */
 
