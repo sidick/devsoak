@@ -428,9 +428,9 @@ main(int argc, char **argv)
             goto cleanup_close;
         }
 
-        /* policy: see PR discussion -- -y is deliberately not honoured
-         * for a live mounted volume, unlike every other confirmation
-         * tier; this is under review. */
+        /* -y is deliberately not honoured for a live mounted volume,
+         * unlike every other confirmation tier: a misconfigured CI job
+         * must not be able to destroy a filesystem someone has open. */
         if (cfg.yes) {
             out_printf("devsoak: %s: volume \"%s:\" is live-mounted; -y "
                        "does not bypass this confirmation. Run "
