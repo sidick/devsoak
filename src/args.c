@@ -200,7 +200,9 @@ LONG
 args_parse(int argc, char **argv)
 {
     int i;
+    int optstart;
     ULONG u;
+    size_t l;
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.duration_s = 60;
@@ -212,19 +214,31 @@ args_parse(int argc, char **argv)
     cfg.watchdog_s = 5;
     cfg.outmode = OUT_CON;
 
-    if (argc < 3) {
-        seterr("usage: devsoak DEVICE UNIT -d -r START,LEN [options]", NULL);
-        return 1;
+    /* second form: `devsoak DH1: -d [options]` -- a single positional
+     * argument ending in ':' is a DOS device name; device/unit/range are
+     * resolved from the mount later (dosdev.c, main.c -- args_parse must
+     * never print, so no resolution happens here). */
+    l = (argc >= 2) ? strlen(argv[1]) : 0;
+    if (l > 1 && argv[1][l - 1] == ':') {
+        cfg.partition = 1;
+        cfg.dosdev = argv[1];
+        optstart = 2;
+    } else {
+        if (argc < 3) {
+            seterr("usage: devsoak DEVICE UNIT -d -r START,LEN [options], "
+                   "or: devsoak NAME: -d [options]", NULL);
+            return 1;
+        }
+        cfg.device = argv[1];
+        if (parse_ulong(argv[2], &u) != 0) {
+            seterr("bad UNIT: ", argv[2]);
+            return 1;
+        }
+        cfg.unit = (LONG)u;
+        optstart = 3;
     }
 
-    cfg.device = argv[1];
-    if (parse_ulong(argv[2], &u) != 0) {
-        seterr("bad UNIT: ", argv[2]);
-        return 1;
-    }
-    cfg.unit = (LONG)u;
-
-    for (i = 3; i < argc; i++) {
+    for (i = optstart; i < argc; i++) {
         char *arg = argv[i];
 
         if (strcmp(arg, "-d") == 0) {
@@ -349,7 +363,10 @@ args_parse(int argc, char **argv)
             seterr("-d is required (devsoak is destructive by design)", NULL);
             return 1;
         }
-        if (!cfg.have_range) {
+        /* partition mode: -r is optional (a relative sub-range of the
+         * partition, resolved once the mount is looked up); otherwise
+         * it is the whole test range and is required as before. */
+        if (!cfg.partition && !cfg.have_range) {
             seterr("-r START,LEN is required", NULL);
             return 1;
         }
@@ -362,9 +379,11 @@ void
 args_usage(void)
 {
     out_printf("devsoak DEVICE UNIT -d -r START,LEN [options]");
+    out_printf("devsoak NAME: -d [options]   (partition mode; see README)");
     out_printf("");
     out_printf("  -d            destructive (required)");
     out_printf("  -r START,LEN  test range in sectors (required); LEN may use K/M/G suffix");
+    out_printf("                partition mode: optional, relative to the partition start");
     out_printf("  -t DURATION   e.g. 30s, 20m, 8h (default 60s)");
     out_printf("  -w N          worker tasks (default 4)");
     out_printf("  -q N          outstanding requests per worker (default 4)");

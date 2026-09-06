@@ -31,6 +31,39 @@ Copperline's synthesized RDB occupies the first cylinder of a bare
 hardfile, so place `-r` past it — e.g. `-r 512,2K` on the 2 MB victim, as
 all three configs' comments note.
 
+## Partition mode with an amibake image
+
+For [partition mode](CLI-Reference.md#partition-mode) (`devsoak DH1:`),
+[amibake](https://github.com/sidick/amibake) builds a bootable image with
+a real, unformatted scratch partition — its `[hdf] scratch` option exists
+precisely for devsoak. **`test/amibake-scratch.toml`** is the manifest:
+AmigaOS 3.2.2 on `DH0`, an 8 MB scratch `DH1` at the end of the disk, and
+an emitted Copperline config.
+
+```
+amibake build --assets assets --out OUTDIR test/amibake-scratch.toml
+```
+
+Then boot the image and point devsoak at the scratch partition by name —
+no `-r`, no victim generation, no RDB offset to remember:
+
+```
+devsoak DH1: -d -t 30s -w 2 -q 2 -A 0 -W 30 -y -o ser
+```
+
+Notes, all learned the hard way (and recorded in the manifest's
+comments): append `[serial] mode = "stdout"` to the emitted Copperline
+config (amibake doesn't emit a serial sink); keep the manifest's
+`ram = "fast:8M"` (a chip-only guest can't allocate the worker
+MaxTransfer buffers and fails with rc 20 before any traffic); and
+Copperline doesn't exit when a `--run` program finishes, so wait for the
+`devsoak: RESULT` line in the serial log and kill it, rather than
+relying on a plain timeout.
+
+The same image also exercises the live-volume refusal: `devsoak DH0: -d
+-y` resolves the system partition, finds its mounted volume, and refuses
+to run — without writing a sector.
+
 ## `ci/smoke.sh`
 
 `ci/smoke.sh` is the CI entry point. It builds a fresh scratch victim,

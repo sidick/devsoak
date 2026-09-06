@@ -44,10 +44,13 @@ dependency. If you change the toolchain flags, re-check with
 
 ```
 devsoak DEVICE UNIT -d -r START,LEN [options]
+devsoak NAME: -d [options]           (partition mode; see below)
 
   -d            destructive (required)
   -r START,LEN  test range in sectors (required); K/M/G suffixes multiply
-                by 1024 (sector counts, not bytes); 0x hex accepted
+                by 1024 (sector counts, not bytes); 0x hex accepted.
+                Partition mode: optional, a sub-range relative to the
+                partition's own start instead of the whole test range.
   -t DURATION   e.g. 30s, 20m, 8h (default 60s)
   -w N          worker tasks (default 4, max 8)
   -q N          outstanding requests per worker (default 4, max 8)
@@ -79,6 +82,37 @@ devsoak DEVICE UNIT -d -r START,LEN [options]
 devsoak refuses to run without both `-d` and `-r`, prints the device
 geometry and the range, and asks for confirmation unless `-y` is given.
 It never writes outside the range (the §8 bounds probes included).
+
+### Partition mode
+
+`devsoak DH1: -d [options]` — a single positional argument ending in `:`
+is taken as a mounted DOS device name instead of `DEVICE UNIT`. devsoak
+looks it up in the DosList, resolves it to the underlying exec
+device/unit and OpenDevice flags, and turns the partition's own extent
+(from its `DosEnvec`: cylinders, surfaces, blocks/track) into the test
+range — printed as `DH1: = scsi.device unit 0, partition sectors
+1004832..1209455`, same as the ordinary `-r` banner. `-r START,LEN` is
+still accepted in this mode, but is reinterpreted as a sub-range
+*relative to the partition's start* (for low-RAM machines that can't
+soak the whole thing); devsoak still never writes outside that range, so
+device-end probes stay read-only and can never spill past the partition
+either.
+
+Before any test traffic, devsoak sends `ACTION_INHIBIT` to the
+partition's handler so the filesystem stops touching the device for the
+run (uninhibited again on every exit path, including errors — a crash
+is the one case that can't clean this up; `--resume` says so). If the
+handler was never started there is nothing to inhibit and devsoak says
+so and continues.
+
+The destructive-run confirmation escalates by what's actually on the
+partition: an empty or unrecognised partition gets the normal `y/N`
+prompt; a recognised filesystem signature with no live volume mounted
+adds a warning line ahead of the same prompt; a **live mounted volume**
+requires typing the volume's name back (case-insensitive) instead of
+`y` — and `-y` does *not* bypass that last tier, so a live volume
+forces an interactive run: a misconfigured CI job must not be able to
+destroy a filesystem someone still has open.
 
 ### Exit codes
 
