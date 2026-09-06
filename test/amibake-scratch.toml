@@ -1,0 +1,25 @@
+# amibake manifest for a partition-mode test image: AmigaOS 3.2.2 on
+# DH0 plus an unformatted 8 MB scratch partition -- amibake's [hdf]
+# scratch option exists precisely for devsoak -- that the guest mounts
+# as DH1: ("Not a DOS disk"), ready for `devsoak DH1: -d ...`.
+#
+# Build (needs amibake, https://github.com/sidick/amibake, with licensed
+# OS 3.2.2 media + Kickstart 47.7 under its assets/):
+#   amibake build --assets assets --out OUTDIR test/amibake-scratch.toml
+# The emitted copperline config lacks a serial sink; append
+#   [serial]
+#   mode = "stdout"
+# before driving it with the ci/smoke.sh conventions. Copperline does not
+# exit when a --run program finishes, so wait for the "devsoak: RESULT"
+# line in the serial log and kill it.
+#
+# fast RAM matters: a chip-only guest cannot allocate the worker
+# MaxTransfer buffers and the run fails with rc 20 before any traffic.
+
+base    = "os3.2.2"
+machine = { cpu = "68020", fpu = true, ram = "fast:8M" }
+output  = ["hdf"]
+emit    = ["copperline"]
+
+[hdf]
+scratch = "8M"
