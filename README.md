@@ -110,8 +110,9 @@ partition: an empty or unrecognised partition gets the normal `y/N`
 prompt; a recognised filesystem signature with no live volume mounted
 adds a warning line ahead of the same prompt; a **live mounted volume**
 requires typing the volume's name back (case-insensitive) instead of
-`y` — and `-y` does *not* bypass that last tier (this policy is under
-review), so a live volume forces an interactive run.
+`y` — and `-y` does *not* bypass that last tier, so a live volume
+forces an interactive run: a misconfigured CI job must not be able to
+destroy a filesystem someone still has open.
 
 ### Exit codes
 
