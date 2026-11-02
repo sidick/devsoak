@@ -28,9 +28,8 @@
  * which is only safe to call from the main task. Since this file's sweep
  * runs from the auditor task as often as from main, calling ring_dump()
  * from here would be a real console-ownership violation whenever the
- * auditor found the mismatch. See the final report for this reasoning;
- * engine.c's own shutdown-path ring_dump() calls are all made from main,
- * where they are safe.
+ * auditor found the mismatch. engine.c's own shutdown-path ring_dump()
+ * calls are all made from main, where they are safe.
  */
 
 #include "devsoak.h"
@@ -414,7 +413,7 @@ auditor_entry(void)
     auditor_done = 1;
     /* returning here runs the default task finalizer, which RemTask()s
      * us; CreateTask() registered our TCB and stack on tc_MemEntry, so
-     * that memory is freed automatically (see final report). */
+     * that memory is freed automatically. */
 }
 
 LONG

@@ -1192,12 +1192,12 @@ run_tier2(struct IOExtTD *io0, struct IOExtTD *io1, struct TestBuf *buf,
 
     /* 19: stop-start. Gated on cfg.risky: CMD_STOP can physically stop or
      * (on removable media) eject/spin down a drive we know nothing about
-     * yet, so it only runs under -Z in this implementation -- see the
-     * final report for the "pinned-working" simplification taken here
-     * (this codebase has no cross-run quirks/pin persistence to fall back
-     * on within a single process, so "already known safe" can only ever
-     * mean "we are in a -Z run and it worked earlier this run", which
-     * cfg.risky already covers). */
+     * yet, so it only runs under -Z. A "pinned-working" exemption would
+     * be the ideal gate, but this codebase has no cross-run quirks/pin
+     * persistence to fall back on within a single process, so "already
+     * known safe" can only ever mean "we are in a -Z run and it worked
+     * earlier this run" -- which cfg.risky already covers, so there is
+     * nothing a separate pin check would add here. */
     if (cfg.risky && !stop_skip && !test_skip_check("stop-start")) {
         struct Result sres;
 
