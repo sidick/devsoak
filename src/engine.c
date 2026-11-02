@@ -558,19 +558,41 @@ engine_run(void)
                            "worker %lu cmd %s(0x%lx)",
                            (ULONG)age, (ULONG)wid, op_cmd_name((UWORD)wcmd),
                            (ULONG)wcmd);
-                out_printf("devsoak: WATCHDOG: a stuck request cannot be "
-                           "safely torn down -- worker/auditor tasks and "
-                           "their I/O buffers are being leaked deliberately "
-                           "rather than risking a free of memory a hung "
-                           "request might still touch; see the final "
-                           "report for the residual risk this leaves in "
-                           "main.c's CloseDevice() on exit");
+                out_printf("devsoak: WATCHDOG: a request that never "
+                           "completes cannot be torn down safely -- "
+                           "closing the device or unloading this code "
+                           "while it is still outstanding risks exactly "
+                           "the kind of memory it might still touch");
+                out_printf("devsoak: WATCHDOG: parking here instead: "
+                           "device stays open, workers/auditor/matrix "
+                           "tasks and their buffers stay resident -- "
+                           "reboot to recover");
                 out_drain();
                 ring_dump(4096);
                 out_printf("devsoak: RESULT FAIL rc=%ld", (LONG)RC_ERROR);
-                return RC_ERROR;   /* deliberately skip all further
-                                      cleanup -- see the comment above and
-                                      the final report */
+                out_drain();
+
+                /* Tell every other task to stop issuing *new* I/O --
+                 * cheap insurance against ones that are not actually
+                 * stuck, reducing load on a bus that is already in
+                 * trouble. But do not wait for or depend on them
+                 * finishing: the request already past -W is proof that
+                 * on this device a request can hang indefinitely, so
+                 * there is no bound to wait for. That rules out
+                 * main()'s normal shutdown path (CloseDevice(),
+                 * stripes_cleanup(), cleanup(), and ultimately this
+                 * code segment being unloaded) for as long as any of
+                 * those tasks -- or the one stuck request itself --
+                 * might still be touching memory we would free. Never
+                 * returning is the only way to guarantee that. */
+                invariant_request_stop();
+                auditor_request_stop();
+                workers_request_stop();
+
+                for (;;)
+                    Wait(0);        /* empty mask: never satisfied, so
+                                       this blocks forever at zero CPU
+                                       cost -- see signals.md */
             }
 
             if (cfg.stoponerror) {
