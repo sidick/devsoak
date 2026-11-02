@@ -37,8 +37,9 @@
  * drains what is already in flight -- other workers are unaffected. It
  * does NOT call ring_dump(): like audit.c, ring_dump() is built on
  * out_printf(), which only main may call. engine.c is expected to call
- * ring_dump() itself after workers_wait_done() when workers_dead() > 0;
- * see the final report for this division of responsibility.
+ * ring_dump() itself after workers_wait_done() when workers_dead() > 0 --
+ * that is the only context in which a ring dump covering a dead worker's
+ * failure can be made safely.
  */
 
 #include "devsoak.h"
@@ -960,8 +961,7 @@ start_one_op(struct WorkerPriv *w)
                    IOF_QUICK submission styles are exercised by the S8
                    invariant matrix (M4) instead. Batching q SendIO()s
                    before draining is exactly what filling the queue up
-                   to qdepth before WaitPort()ing already does. See the
-                   final report. */
+                   to qdepth before WaitPort()ing already does. */
                 SendIO((struct IORequest *)w->io[qi]);
                 w->pub.inflight++;
 

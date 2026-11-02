@@ -19,7 +19,15 @@
  * devsoak is a static string literal under our control and kept well
  * under the buffer size; the buffers are sized generously (512 bytes)
  * against a hard 255-char post-format truncation, not as an enforced
- * limit during RawDoFmt itself. See the final report for this risk.
+ * limit during RawDoFmt itself. The 255-char cap is a real, silent risk
+ * on its own, not just the overrun: a format string that grows past it
+ * (easy to miss when a message is a handful of concatenated C string
+ * literals) gets cut mid-sentence with no warning -- exactly what
+ * happened to engine.c's original 297-char WATCHDOG message, which lost
+ * its last 40-odd characters without anyone noticing until a user hit
+ * it in the field. Keep every out_printf() format under ~250 chars
+ * after substitution, and split long messages across two calls rather
+ * than trust the cap to catch a miscount.
  *
  * The serial sink emits via the ROM debug entry point RawPutChar
  * (exec LVO -516): private but stable from Kickstart 1.3 through 3.x and
