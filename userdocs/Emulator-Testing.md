@@ -31,6 +31,24 @@ Copperline's synthesized RDB occupies the first cylinder of a bare
 hardfile, so place `-r` past it — e.g. `-r 512,2K` on the 2 MB victim, as
 all three configs' comments note.
 
+That RDB is not part of the image. Copperline decides whether to add it
+each time it opens the file, from the `DOS` boot block in the file's
+first sector — and device sector 512 *is* the file's first sector, so
+devsoak's fill overwrites it. The next open then finds a flat image, one
+cylinder smaller (4096 sectors instead of 4608 on the 2 MB victim). Two
+consequences:
+
+- Generate a fresh victim for every run, as `ci/smoke.sh` does. A reused
+  one comes back with a different geometry.
+- A run that re-opens the image part-way — `-R` against copperhf.device,
+  where `copperhf.attach` is the insert — sees the geometry change under
+  it and fails `geometry-stable` and `read-last-sector`. Use an
+  unformatted victim for those, so the device is flat from the start:
+
+    ```
+    dd if=/dev/zero of=victim.hdf bs=1024k count=2
+    ```
+
 ## Partition mode with an amibake image
 
 For [partition mode](CLI-Reference.md#partition-mode) (`devsoak DH1:`),
