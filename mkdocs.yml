@@ -47,3 +47,4 @@ nav:
   - The Quirks File: Quirks.md
   - Fingerprinting Drivers: Fingerprinting.md
   - Testing under Emulation: Emulator-Testing.md
+  - Fault Injection with Copperline: Fault-Injection.md
