@@ -51,9 +51,11 @@
  * ADDCHANGEINT with IOERR_ABORTED and stop delivering to it (a task that
  * exits without REMCHANGEINT would otherwise hang forever in WaitIO).
  * The wait for completion is bounded -- a stub AbortIO must not hang the
- * run -- and an ignored abort is a pinned observation, not a failure; the
- * request then falls back to the normal REMCHANGEINT path. The outcome
- * is reported as a stable "addchangeint-abort:" line.
+ * run -- and an ignored abort is a per-driver observation, not a failure;
+ * the request then falls back to the normal REMCHANGEINT path. The
+ * outcome is reported as a stable "addchangeint-abort: aborted|ignored"
+ * line. When the driver honours the abort, one more eject/insert cycle
+ * (a third) is requested to prove delivery to it stopped.
  */
 
 #include "devsoak.h"
@@ -92,9 +94,7 @@ struct removable_state {
                                             already WaitIO'd, no REMCHANGEINT
                                             needed */
     UBYTE             remdone[N_ALL];/* TD_REMCHANGEINT already issued and
-                                         the pending request reaped (also
-                                         set once an AbortIO'd request has
-                                         completed and been reaped) */
+                                         the pending request reaped */
     struct Interrupt  ints[N_ALL];
 
     struct IOExtTD   *rio;           /* fourth request: ETD_READ probe /
@@ -166,24 +166,30 @@ scan_addchangeint(struct removable_state *st)
  * version of this file did, via dev.io) wedges trackdisk.device 47.
  * DoIO() doubles as the reap: when it returns, the request is ours
  * again. */
-static void
-remchangeint_one(struct removable_state *st, ULONG i)
+static LONG
+remchangeint_quiet(struct removable_state *st, ULONG i)
 {
-    LONG err;
-
     st->aio[i]->iotd_Req.io_Command = TD_REMCHANGEINT;
     st->aio[i]->iotd_Req.io_Data    = (APTR)&st->ints[i];
     st->aio[i]->iotd_Req.io_Length  = sizeof(struct Interrupt);
     st->aio[i]->iotd_Req.io_Flags   = 0;
 
     DoIO((struct IORequest *)st->aio[i]);
-    err = (LONG)(BYTE)st->aio[i]->iotd_Req.io_Error;
+    st->remdone[i] = 1;
+    return (LONG)(BYTE)st->aio[i]->iotd_Req.io_Error;
+}
+
+/* As above, counting and reporting a REMCHANGEINT error as a failure. */
+static void
+remchangeint_one(struct removable_state *st, ULONG i)
+{
+    LONG err = remchangeint_quiet(st, i);
+
     if (err != 0) {
         out_printf("devsoak: removable: FAIL TD_REMCHANGEINT %ld error %ld",
                    (LONG)i, err);
         st->failures++;
     }
-    st->remdone[i] = 1;
 }
 
 /* Single funnel for cleanup on every path (brief S8 requirement): reaps
@@ -234,8 +240,9 @@ teardown(struct removable_state *st)
  * (the autodoc has it return an error code, 0 = aborted), so the result
  * cannot be had through proto/exec.h: call LVO -480 (0x1e0) directly with
  * A6=SysBase, A1=request. exec's AbortIO is a thin jump into the device's
- * own AbortIO vector, so D0 is whatever the driver returned. noinline
- * because the callee may trash A1, which a caller must not rely on. */
+ * own AbortIO vector, so D0 is whatever the driver returned (only as
+ * meaningful as the driver makes it). noinline because the callee may
+ * trash A1, which a caller must not rely on. */
 static LONG __attribute__((noinline))
 abortio_rc(struct IORequest *io)
 {
@@ -664,27 +671,35 @@ removable_phase(void)
             }
 
             if (!done) {
-                /* AbortIO ignored: a pinned observation, not a failure.
+                /* AbortIO ignored: a per-driver observation, not a failure.
                  * Fall back to REMCHANGEINT through the same request
                  * (see remchangeint_one); no further cycle needed. */
-                out_printf("devsoak: removable: addchangeint-abort: ignored "
-                           "(AbortIO rc %ld)", abort_rc);
+                out_printf("devsoak: removable: addchangeint-abort: ignored");
+                out_printf("devsoak: removable: AbortIO returned %ld", abort_rc);
                 remchangeint_one(&st, a);
             } else {
                 WaitIO((struct IORequest *)st.aio[a]);
-                st.remdone[a] = 1;  /* reaped; must not be REMCHANGEINT'd */
+                st.completed[a] = 1;  /* reaped; teardown must not touch it */
                 err = (LONG)(BYTE)st.aio[a]->iotd_Req.io_Error;
 
                 if (err != IOERR_ABORTED) {
                     out_printf("devsoak: removable: FAIL aborted "
                                "TD_ADDCHANGEINT completed with err %ld, "
-                               "expected IOERR_ABORTED (%ld) "
-                               "(AbortIO rc %ld)",
-                               err, (LONG)IOERR_ABORTED, abort_rc);
+                               "expected IOERR_ABORTED (%ld)",
+                               err, (LONG)IOERR_ABORTED);
+                    out_printf("devsoak: removable: AbortIO returned %ld",
+                               abort_rc);
                     st.failures++;
+                    /* The handler may still be linked in the driver and
+                     * st.ints[] is stack: best-effort unlink through the
+                     * (reaped, so reusable) request; its error is
+                     * expected on a misbehaving driver, not a failure. */
+                    (void)remchangeint_quiet(&st, a);
                 } else {
                     out_printf("devsoak: removable: addchangeint-abort: "
-                               "aborted (AbortIO rc %ld)", abort_rc);
+                               "aborted");
+                    out_printf("devsoak: removable: AbortIO returned %ld",
+                               abort_rc);
 
                     /* prove delivery to the aborted request stopped */
                     snap_c = chg_count[a];
@@ -703,6 +718,8 @@ removable_phase(void)
                                    "interrupt fired after AbortIO of its "
                                    "TD_ADDCHANGEINT");
                         st.failures++;
+                        /* still linked: unlink quietly, as above */
+                        (void)remchangeint_quiet(&st, a);
                     }
 
                     request_transition(&st, "insert");

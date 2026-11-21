@@ -13,7 +13,8 @@
    unsupported-opcode autosense) and **`-R` removable phase** (three
    TD_ADDCHANGEINT handlers, an eject/insert cycle, stale-ETD checks,
    TD_REMCHANGEINT delivery-stop proof, AbortIO of a held
-   TD_ADDCHANGEINT; the range is refilled after).
+   TD_ADDCHANGEINT (plus a third eject/insert cycle if the driver
+   honours the abort); the range is refilled after).
 4. **Soak**: N worker tasks each keep `q` requests in flight — 45%
    writes, 45% read-verifies, 10% housekeeping — across every command
    dialect the driver was probed to support (CMD, ETD, TD64, NSD64,
@@ -94,6 +95,14 @@ Zero-length probes hard-fail only when bytes beyond the claimed
 io_Actual are touched. Two drivers can both be "correct" and pin
 differently — that's what the [quirks file](Quirks.md) records, and what
 [fingerprints](Fingerprinting.md) capture per driver version.
+
+The `-R` phase also prints one `addchangeint-abort: aborted` or
+`addchangeint-abort: ignored` line, reporting whether the driver
+completed a held TD_ADDCHANGEINT with IOERR_ABORTED when it was
+`AbortIO()`'d. This is a per-driver observation, not a failure, and not
+a matrix pin, so fingerprints do not capture it. Observed so far:
+copperhf.device (Copperline 1.2.0) aborted; trackdisk.device 47.14
+ignored it.
 
 ## Run profiles
 
