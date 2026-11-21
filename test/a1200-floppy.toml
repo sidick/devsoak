@@ -1,8 +1,8 @@
 # devsoak -R test config: A1200 + KS3.2, scratch ADF in df0
 # (trackdisk.device unit 0, genuinely removable), turbo floppy,
 # serial to host stdout. Eject/insert driven from the host over CCP:
-#   copperline-ctl media.floppy.eject  {"unit":0}
-#   copperline-ctl media.floppy.insert {"unit":0,"path":"blank.adf"}
+#   copperline-ctl media.floppy.eject  {"drive":0}
+#   copperline-ctl media.floppy.insert {"drive":0,"path":"blank.adf"}
 #
 # Scratch disk: xdftool blank.adf create + format Scratch ofs
 
