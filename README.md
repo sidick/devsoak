@@ -261,7 +261,9 @@ the resource footprint small:
    READ CAPACITY vs TD_GETGEOMETRY, READ(10) vs CMD_READ byte-compare,
    unsupported-opcode autosense) and **-R removable phase** (three
    TD_ADDCHANGEINT handlers, an eject/insert cycle, stale-ETD checks,
-   TD_REMCHANGEINT delivery-stop proof; the range is refilled after).
+   TD_REMCHANGEINT delivery-stop proof, AbortIO of a held
+   TD_ADDCHANGEINT (plus a third eject/insert cycle if the driver
+   honours the abort); the range is refilled after).
 4. **Soak**: N worker tasks each keep q requests in flight — 45 % writes,
    45 % read-verifies, 10 % housekeeping — across every command dialect
    the driver was probed to support (CMD, ETD, TD64, NSD64, NSD-ETD64),

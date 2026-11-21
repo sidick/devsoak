@@ -494,9 +494,13 @@ LONG scsicmd_phase(void);
  * TD_ADDCHANGEINT handlers, drives (or prompts for) an eject/insert
  * cycle, checks all three fire + CHANGENUM increments + ETD fails
  * TDERR_DiskChanged while no disk is present, then TD_REMCHANGEINT and
- * a second cycle to prove delivery stopped. Zeroes g_generation[]
- * before returning (medium may have been swapped); the engine refills
- * and re-audits afterwards. Updates g_changenum. */
+ * a second cycle to prove delivery stopped, then one fresh ADDCHANGEINT
+ * is AbortIO'd (bounded wait; IOERR_ABORTED, then a third eject/insert
+ * cycle proving no further delivery, or an ignored abort which is
+ * REMCHANGEINT'd instead with no extra cycle; the outcome is reported as
+ * an "addchangeint-abort: aborted|ignored" line). Zeroes g_generation[] before returning
+ * (medium may have been swapped); the engine refills and re-audits
+ * afterwards. Updates g_changenum. */
 
 LONG removable_phase(void);
 

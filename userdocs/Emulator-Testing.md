@@ -112,12 +112,15 @@ disk. Under Copperline, drive that from the host over the Copperline
 Control Protocol instead of answering an interactive prompt:
 
 ```
-copperline-ctl media.floppy.eject  {"unit":0}
-copperline-ctl media.floppy.insert {"unit":0,"path":"blank.adf"}
+copperline-ctl media.floppy.eject  {"drive":0}
+copperline-ctl media.floppy.insert {"drive":0,"path":"blank.adf"}
 ```
 
 as wired up in `test/a1200-floppy.toml`. Only one CCP client may be
-attached at a time. Pair a TCP serial sink with the CCP script so the
+attached at a time. The number of eject/insert cycles is not fixed (a
+third is requested when the driver honours the AbortIO test), so host
+automation must answer each prompt as it appears rather than assume a
+set number of cycles. Pair a TCP serial sink with the CCP script so the
 prompts are visible to the host in real time as devsoak issues them.
 
 ## Floppy-specific notes
